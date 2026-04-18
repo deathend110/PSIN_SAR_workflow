@@ -1,0 +1,16 @@
+sys:
+  icore: dummy://preview-only
+  input:
+    gray_dir: ./io/gray
+    rgb_dir: ./io/rgb
+    fps: 10
+    loop: false
+  display:
+    type: preview
+    width: 1920
+    height: 1080
+    fps: 60
+  output:
+    mode: preview
+    preview_wait_ms: 100
+    window_name: double_dir+hdmi_preview

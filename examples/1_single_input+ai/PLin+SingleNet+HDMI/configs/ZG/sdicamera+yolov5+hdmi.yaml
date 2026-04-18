@@ -1,0 +1,44 @@
+sys:
+  Version: __3.31__
+  device: axi://zg330aiu?npu=0x40000000&dma=0x80000000
+  mmuMode: true
+  speedMode: false
+  compressFtmp: false
+  ocm_option: 1
+  profile: false
+  run_backend: zg330
+  # for debug
+  dump_output: false
+  dump_format: SFB
+  log_path: ../io/output/ftmp
+  SKIP_CAMERA_ERROR: false # true: skip camera error and no ai on this frame, false: execute ai on PL but no draw
+  DEBUG: true
+  DEBUG_FLAGS: 1 # uint8_t binary: bit0: console, bit1: draw&save, bit2: dump ftmps, bit3: save camera frame
+
+pipeline:
+  camera:
+    vtc: false
+    width: 1920
+    height: 1080
+    fps: 60 # max fps for 4 inputs
+  display:
+    type: hdmi
+    width: 1920
+    height: 1080
+    fps: 60
+  icore:
+    model: yolov5s
+    jsons:
+    - ./imodel/ZG/yolov5s_plin_352x640_ZG.json
+    raws:
+    - ./imodel/ZG/yolov5s_plin_352x640_ZG.raw
+    net_w: 640
+    net_h: 352
+    names: names/coco.names
+    conf: 0.2
+    iou_thresh: 0.5
+    multilabel: false
+    number_of_class: 80
+    anchors: [[[10.,13.],[16.,30.],[33.,23.]],[[30.,61.],[62.,45.],[59.,119.]],[[116.,90.],[156.,198.],[373.,326.]]]
+    fpga_nms: false
+    detpost: true

@@ -1,0 +1,12 @@
+sys:
+  icore: axi://zg330aiu?npu=0x40000000&dma=0x80000000
+  camera:
+    vtc: false
+    width: 1920
+    height: 1080
+    fps: 60
+  display:
+    type: hdmi
+    width: 1920
+    height: 1080
+    fps: 60

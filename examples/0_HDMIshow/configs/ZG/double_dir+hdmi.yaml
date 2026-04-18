@@ -1,0 +1,14 @@
+sys:
+  icore: axi://zg330aiu?npu=0x40000000&dma=0x80000000
+  input:
+    gray_dir: ./io/gray
+    rgb_dir: ./io/rgb
+    fps: 30
+    loop: false
+  display:
+    type: hdmi
+    width: 1920
+    height: 1080
+    fps: 60
+  output:
+    mode: hdmi
