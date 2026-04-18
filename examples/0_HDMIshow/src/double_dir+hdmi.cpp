@@ -27,6 +27,7 @@ using namespace fpai;
 
 namespace
 {
+    // HDMI 显示链路这里采用 4 个循环 buffer，和示例整体的轻量需求相匹配。
     constexpr int BUFFER_COUNT = 4;
     constexpr const char *DEFAULT_PREVIEW_WINDOW = "double_dir+hdmi_preview";
 
@@ -37,6 +38,7 @@ namespace
         return value;
     }
 
+    // dump 模式下把合成好的 BGR 帧落盘，方便在 PC 或板端排查布局是否正确。
     void dumpFrame(const cv::Mat &frame_bgr, const std::string &dump_dir, size_t pair_index)
     {
         std::filesystem::create_directories(dump_dir);
@@ -44,6 +46,8 @@ namespace
         cv::imwrite(filename, frame_bgr);
     }
 
+    // 桌面路径：
+    // 不访问板端 HDMI，只做 preview / dump，便于在 Windows 上先验证读图和拼帧逻辑。
     int runPreviewOrDump(const hdmi_show::SimpleYamlConfig &config)
     {
         const std::string gray_dir = config.getString("sys.input.gray_dir");
@@ -65,6 +69,7 @@ namespace
             return -1;
         }
 
+        // Linux 板端默认不编入 highgui 预览接口，避免链接到 namedWindow/imshow 等桌面依赖。
 #if !defined(_WIN32)
         if (enable_preview)
         {
@@ -94,6 +99,7 @@ namespace
             if (enable_preview)
             {
 #if defined(_WIN32)
+                // preview 只是调试辅助能力，不影响 HDMI 主流程。
                 cv::imshow(window_name, composed_bgr);
                 const int key = cv::waitKey(preview_wait_ms);
                 if (key == 27 || key == 'q' || key == 'Q')
@@ -114,6 +120,9 @@ namespace
         return 0;
     }
 
+    // 板端 HDMI 路径：
+    // 双目录输入 actor 负责产生 RGB565 帧，
+    // HDMI actor 负责从 buffer 中取出这些帧并送到显示硬件。
     int runHdmi(const hdmi_show::SimpleYamlConfig &config)
     {
         const std::string device_fn = config.getString("sys.icore");
@@ -128,6 +137,7 @@ namespace
         auto fpai_device = device.cast<FPAIDevice>();
 
 #if defined(USE_BUYI_BACKEND)
+        // BY 后端下沿用现有示例的 MMU 设置。
         fpai_device.mmuModeSwitch(false);
 #endif
 
@@ -135,6 +145,7 @@ namespace
         ThreadSafeQueue<InputMessageForIcore> display_queue(BUFFER_COUNT);
 
         int source_id = 0;
+        // 输入 actor：磁盘双目录 -> 合成整帧 -> 写入 RGB565 buffer。
         auto input_actor = std::make_unique<DoubleDirectoryInputActor<FPAIDevice>>(source_id,
                                                                                    fpai_device,
                                                                                    buffer_manager,
@@ -147,6 +158,7 @@ namespace
         input_actor->bindOutputQueue(&display_queue);
 
         int hdmi_id = 0;
+        // 显示 actor：消费 buffer_index，并把对应帧真正输出到 HDMI。
         auto hdmi_display = std::make_unique<RGB565HDMIDisplay<FPAIDevice>>(hdmi_id, fpai_device, frame_w, frame_h);
         HDMIDisplayActor<FPAIDevice, InputMessageForIcore> display_actor(hdmi_display->getSinkId(),
                                                                          std::move(hdmi_display),
@@ -161,12 +173,14 @@ namespace
 
         if (loop)
         {
+            // 循环模式下没有自然结束条件，因此通过回车手动停止。
             spdlog::info("HDMI loop mode enabled. Press Enter to stop.");
             std::getchar();
             input_actor->stop();
         }
         else
         {
+            // 非循环模式下，输入播完就退出。
             while (!input_actor->isFinished())
             {
                 std::this_thread::sleep_for(50ms);
@@ -183,6 +197,7 @@ namespace
 
 int main(int argc, char *argv[])
 {
+    // 命令行只要求一个参数：配置文件路径。
     if (argc < 2)
     {
         std::fprintf(stderr, "Usage: %s <config yaml>\n", argv[0]);
@@ -204,6 +219,9 @@ int main(int argc, char *argv[])
     spdlog::set_level(log_level);
     spdlog::info("Log level set to '{}'", spdlog::level::to_string_view(log_level));
 
+    // 通过 sys.output.mode 选择运行路径：
+    // - hdmi: 板端真实 HDMI 输出
+    // - 其他: preview / dump / preview_dump
     const std::string output_mode = toLower(config.getStringOr("sys.output.mode", "hdmi"));
     if (output_mode == "hdmi")
     {

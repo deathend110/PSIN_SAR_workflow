@@ -10,6 +10,10 @@
 
 namespace hdmi_show
 {
+    // 这是一个非常轻量的配置解析器，只覆盖当前示例需要的 YAML 子集：
+    // - 通过缩进表示层级
+    // - 通过 key: value 表示叶子节点
+    // 解析后统一拍平成 "sys.input.gray_dir" 这种点分路径，方便直接读取。
     class SimpleYamlConfig
     {
     public:
@@ -32,6 +36,7 @@ namespace hdmi_show
 
             while (std::fgets(raw_buffer, sizeof(raw_buffer), input) != nullptr)
             {
+                // 原始行先去掉换行，再去掉注释和首尾空白。
                 std::string raw_line(raw_buffer);
                 while (!raw_line.empty() && (raw_line.back() == '\n' || raw_line.back() == '\r'))
                 {
@@ -56,11 +61,13 @@ namespace hdmi_show
 
                 if (section_stack.size() > level)
                 {
+                    // 当前缩进层级变浅时，说明从子节点退回到了上层 section。
                     section_stack.resize(level);
                 }
 
                 if (value.empty())
                 {
+                    // 例如 "sys:" 这种只有键没有值的行，表示进入一个新的 section。
                     if (section_stack.size() == level)
                     {
                         section_stack.push_back(key);
@@ -86,6 +93,7 @@ namespace hdmi_show
                     dotted_key += ".";
                 }
                 dotted_key += key;
+                // 例如 sys -> input -> gray_dir 会被拍平成 sys.input.gray_dir。
                 values[dotted_key] = unquote(value);
             }
 
@@ -94,6 +102,7 @@ namespace hdmi_show
             return SimpleYamlConfig(std::move(values));
         }
 
+        // 必填字符串；不存在时直接抛错。
         std::string getString(const std::string &key) const
         {
             auto it = values_.find(key);
@@ -104,6 +113,7 @@ namespace hdmi_show
             return it->second;
         }
 
+        // 可选字符串；不存在时返回默认值。
         std::string getStringOr(const std::string &key, const std::string &default_value) const
         {
             auto it = values_.find(key);
@@ -114,11 +124,13 @@ namespace hdmi_show
             return it->second;
         }
 
+        // 必填整数。
         int getInt(const std::string &key) const
         {
             return std::stoi(getString(key));
         }
 
+        // 可选整数。
         int getIntOr(const std::string &key, int default_value) const
         {
             auto it = values_.find(key);
@@ -129,6 +141,7 @@ namespace hdmi_show
             return std::stoi(it->second);
         }
 
+        // 可选布尔值，只接受 true / false（大小写不敏感）。
         bool getBoolOr(const std::string &key, bool default_value) const
         {
             auto it = values_.find(key);
@@ -151,6 +164,7 @@ namespace hdmi_show
         }
 
     private:
+        // 去掉首尾空白字符。
         static std::string trim(const std::string &value)
         {
             const auto begin = std::find_if_not(value.begin(), value.end(), [](unsigned char ch)
@@ -164,6 +178,7 @@ namespace hdmi_show
             return std::string(begin, end);
         }
 
+        // 去掉行内注释，形如 "key: value # comment"。
         static std::string stripComment(const std::string &value)
         {
             const auto hash_pos = value.find('#');
@@ -174,6 +189,7 @@ namespace hdmi_show
             return value.substr(0, hash_pos);
         }
 
+        // 去掉包裹值的单引号或双引号。
         static std::string unquote(const std::string &value)
         {
             if (value.size() >= 2)
