@@ -58,6 +58,8 @@ namespace
         std::string raw_path;
 
         bool dump_outputs = true;
+        bool dump_input_patches = false;
+        int dump_input_limit = 20;
         std::string dump_format = "SFB";
         std::string output_dir = "./io/output/imgpatch";
         int output_wait_ms = 20000;
@@ -360,6 +362,25 @@ namespace
         return Tensor(out_dtype, param_chunk);
     }
 
+    Tensor dataToFp32Tensor(const float *input_data, const Value &input_value)
+    {
+        TensorType out_dtype;
+        if (input_value.tensorType()->shape[0] == -1)
+        {
+            out_dtype = input_value.getUsesOp()[0]->outputs[0].tensorType().clone();
+        }
+        else
+        {
+            out_dtype = input_value.tensorType().clone();
+        }
+
+        const auto size = out_dtype.numElements();
+        auto param_chunk = HostDevice::MemRegion().malloc(size * sizeof(float));
+        auto *dst = reinterpret_cast<float *>(param_chunk->begin.cptr());
+        std::memcpy(dst, input_data, size * sizeof(float));
+        return Tensor(out_dtype, param_chunk);
+    }
+
     AppConfig loadConfig(const std::string &config_path)
     {
         const SimpleYaml config(config_path);
@@ -381,6 +402,8 @@ namespace
         cfg.raw_path = config.get<std::string>("pipeline.icore.raw");
 
         cfg.dump_outputs = config.valueOr<bool>("debug.dump_outputs", true);
+        cfg.dump_input_patches = config.valueOr<bool>("debug.dump_input_patches", false);
+        cfg.dump_input_limit = config.valueOr<int>("debug.dump_input_limit", 20);
         cfg.dump_format = config.valueOr<std::string>("debug.dump_format", "SFB");
         cfg.output_dir = config.valueOr<std::string>("debug.output_dir", "./io/output/imgpatch");
         cfg.output_wait_ms = config.valueOr<int>("debug.output_wait_ms", 20000);
@@ -414,16 +437,17 @@ namespace
                 throw std::runtime_error("Image must be CV_8UC1 after grayscale read.");
             }
 
-            stride_ = static_cast<int>(std::lround(patch_size_ * (1.0 - overlap_ratio_)));
-            if (stride_ <= 0)
+            col_stride_ = static_cast<int>(std::lround(patch_size_ * (1.0 - overlap_ratio_)));
+            row_stride_ = patch_size_;
+            if (col_stride_ <= 0 || row_stride_ <= 0)
             {
-                throw std::runtime_error("Computed stride must be positive.");
+                throw std::runtime_error("Computed patch stride must be positive.");
             }
 
             if (image_u8_.cols >= patch_size_ && image_u8_.rows >= patch_size_)
             {
-                cols_ = (image_u8_.cols - patch_size_) / stride_ + 1;
-                rows_ = (image_u8_.rows - patch_size_) / stride_ + 1;
+                cols_ = (image_u8_.cols - patch_size_) / col_stride_ + 1;
+                rows_ = (image_u8_.rows - patch_size_) / row_stride_ + 1;
                 total_ = rows_ * cols_;
             }
         }
@@ -439,8 +463,8 @@ namespace
             const int order_in_row = cursor_ % cols_;
             const bool right_to_left = (row % 2) == 1;
             const int col = right_to_left ? (cols_ - 1 - order_in_row) : order_in_row;
-            const int x = col * stride_;
-            const int y = row * stride_;
+            const int x = col * col_stride_;
+            const int y = row * row_stride_;
 
             packet.info.index = cursor_;
             packet.info.grid_row = row;
@@ -459,7 +483,8 @@ namespace
         int imageWidth() const { return image_u8_.cols; }
         int imageHeight() const { return image_u8_.rows; }
         int patchSize() const { return patch_size_; }
-        int stride() const { return stride_; }
+        int colStride() const { return col_stride_; }
+        int rowStride() const { return row_stride_; }
         int rows() const { return rows_; }
         int cols() const { return cols_; }
         int totalPatches() const { return total_; }
@@ -469,7 +494,8 @@ namespace
         cv::Mat image_u8_;
         int patch_size_ = 512;
         double overlap_ratio_ = 0.5;
-        int stride_ = 256;
+        int col_stride_ = 256;
+        int row_stride_ = 512;
         int rows_ = 0;
         int cols_ = 0;
         int total_ = 0;
@@ -493,11 +519,24 @@ namespace
                                          shapeToString(shape));
             }
 
-            const auto storage_type = input_value_.tensorType()->element_dtype.getStorageType();
-            if (!storage_type.is<icraft::xir::IntegerType>() ||
-                !storage_type.cast<icraft::xir::IntegerType>().isUInt8())
+            const auto element_dtype = input_value_.tensorType()->element_dtype;
+            const auto storage_type = element_dtype.getStorageType();
+            spdlog::info("Model input dtype={}, storage={}",
+                         element_dtype->typeKey(),
+                         storage_type->typeKey());
+            if (storage_type.isUInt(8))
             {
-                throw std::runtime_error("Model input dtype must be UINT8 for raw 0-255 patch input.");
+                storage_kind_ = StorageKind::UInt8;
+                spdlog::info("Patch tensor mode: UINT8 pixels, range 0-255.");
+            }
+            else if (storage_type.isFP32())
+            {
+                storage_kind_ = StorageKind::FP32;
+                spdlog::info("Patch tensor mode: FP32 pixels, range 0-255. Keep raw scale because parse pre_scale handles /255.");
+            }
+            else
+            {
+                throw std::runtime_error("Model input storage dtype must be UINT8 or FP32 for raw 0-255 patch input.");
             }
         }
 
@@ -517,22 +556,46 @@ namespace
             }
 
             cv::Mat continuous = patch_u8.isContinuous() ? patch_u8 : patch_u8.clone();
-            return dataToUInt8Tensor(continuous.data, input_value_);
+            if (storage_kind_ == StorageKind::UInt8)
+            {
+                return dataToUInt8Tensor(continuous.data, input_value_);
+            }
+
+            cv::Mat patch_f32;
+            continuous.convertTo(patch_f32, CV_32FC1);
+            if (!patch_f32.isContinuous())
+            {
+                patch_f32 = patch_f32.clone();
+            }
+            return dataToFp32Tensor(reinterpret_cast<const float *>(patch_f32.data), input_value_);
         }
 
     private:
+        enum class StorageKind
+        {
+            UInt8,
+            FP32
+        };
+
         icraft::xir::Value input_value_;
+        StorageKind storage_kind_ = StorageKind::UInt8;
     };
 
     class DebugOutputDumper
     {
     public:
-        DebugOutputDumper(bool enabled, std::string output_dir, std::string dump_format)
-            : enabled_(enabled),
+        DebugOutputDumper(bool dump_outputs,
+                          bool dump_input_patches,
+                          int dump_input_limit,
+                          std::string output_dir,
+                          std::string dump_format)
+            : dump_outputs_(dump_outputs),
+              dump_input_patches_(dump_input_patches),
+              dump_input_limit_(dump_input_limit),
               output_dir_(std::move(output_dir)),
               dump_format_(std::move(dump_format))
         {
-            if (enabled_)
+            if (dump_outputs_ || dump_input_patches_)
             {
                 fs::create_directories(output_dir_);
                 index_csv_.open(fs::path(output_dir_) / "patch_index.csv", std::ios::out);
@@ -540,24 +603,45 @@ namespace
             }
         }
 
-        void dump(const PatchInfo &info, std::vector<Tensor> &host_outputs)
+        void dumpInputPatch(const PatchInfo &info, const cv::Mat &patch_u8)
         {
-            if (!enabled_)
+            if (!shouldDumpInputPatch(info.index))
             {
                 return;
             }
 
             const auto patch_dir = fs::path(output_dir_) / ("patch_" + formatPatchIndex(info.index));
             fs::create_directories(patch_dir);
-            for (size_t i = 0; i < host_outputs.size(); ++i)
+
+            const auto input_path = patch_dir / "input.png";
+            if (!cv::imwrite(input_path.string(), patch_u8))
             {
-                const auto out_path = patch_dir / ("out_" + std::to_string(i) + ".ftmp");
-                std::ofstream ofs(out_path, std::ios::binary);
-                if (!ofs)
+                throw std::runtime_error("Failed to write input patch png: " + input_path.string());
+            }
+        }
+
+        void dump(const PatchInfo &info, std::vector<Tensor> &host_outputs)
+        {
+            if (!dump_outputs_ && !dump_input_patches_)
+            {
+                return;
+            }
+
+            const auto patch_dir = fs::path(output_dir_) / ("patch_" + formatPatchIndex(info.index));
+            fs::create_directories(patch_dir);
+
+            if (dump_outputs_)
+            {
+                for (size_t i = 0; i < host_outputs.size(); ++i)
                 {
-                    throw std::runtime_error("Failed to open output dump file: " + out_path.string());
+                    const auto out_path = patch_dir / ("out_" + std::to_string(i) + ".ftmp");
+                    std::ofstream ofs(out_path, std::ios::binary);
+                    if (!ofs)
+                    {
+                        throw std::runtime_error("Failed to open output dump file: " + out_path.string());
+                    }
+                    host_outputs[i].dump(ofs, dump_format_);
                 }
-                host_outputs[i].dump(ofs, dump_format_);
             }
 
             index_csv_ << info.index << ","
@@ -579,7 +663,15 @@ namespace
             return std::string(buf);
         }
 
-        bool enabled_ = false;
+        bool shouldDumpInputPatch(int patch_index) const
+        {
+            return dump_input_patches_ &&
+                   (dump_input_limit_ <= 0 || patch_index < dump_input_limit_);
+        }
+
+        bool dump_outputs_ = false;
+        bool dump_input_patches_ = false;
+        int dump_input_limit_ = 20;
         std::string output_dir_;
         std::string dump_format_;
         std::ofstream index_csv_;
@@ -676,14 +768,19 @@ int main(int argc, char *argv[])
 
         SnakePatchSource patch_source(cfg.image_path, cfg.patch_size, cfg.overlap_ratio);
         spdlog::info("Loaded image {}: {}x{}", cfg.image_path, patch_source.imageWidth(), patch_source.imageHeight());
-        spdlog::info("Patch grid: rows={}, cols={}, total={}, patch_size={}, stride={}",
+        spdlog::info("Patch grid: rows={}, cols={}, total={}, patch_size={}, col_stride={}, row_stride={}",
                      patch_source.rows(),
                      patch_source.cols(),
                      patch_source.totalPatches(),
                      patch_source.patchSize(),
-                     patch_source.stride());
+                     patch_source.colStride(),
+                     patch_source.rowStride());
 
-        DebugOutputDumper dumper(cfg.dump_outputs, cfg.output_dir, cfg.dump_format);
+        DebugOutputDumper dumper(cfg.dump_outputs,
+                                  cfg.dump_input_patches,
+                                  cfg.dump_input_limit,
+                                  cfg.output_dir,
+                                  cfg.dump_format);
         PatchInferenceRunner runner(session, device, cfg.output_wait_ms);
         PatchPostprocessFunc postprocess = defaultPatchPostprocess;
 
@@ -699,6 +796,7 @@ int main(int argc, char *argv[])
                          packet.info.y,
                          directionString(packet.info));
 
+            dumper.dumpInputPatch(packet.info, packet.patch_u8);
             Tensor input_tensor = tensor_builder.build(packet.patch_u8);
             std::vector<Tensor> host_outputs = runner.forward(input_tensor);
             dumper.dump(packet.info, host_outputs);
