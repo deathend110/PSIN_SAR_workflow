@@ -1,0 +1,24 @@
+sys:
+  device: axi://zg330aiu?npu=0x40000000&dma=0x80000000
+  run_backend: zg330
+  mmuMode: true
+  speedMode: false
+  compressFtmp: false
+  ocm_option: 1
+  profile: false
+
+pipeline:
+  input:
+    image_path: ./io/input/big_gray.png
+  patch:
+    patch_size: 512
+    overlap_ratio: 0.5
+  icore:
+    json: ./imodel/ZG/RAAUNet_DeepCA48_MobileNetV3Unet_V1_ZG.json
+    raw: ./imodel/ZG/RAAUNet_DeepCA48_MobileNetV3Unet_V1_ZG.raw
+
+debug:
+  dump_outputs: true
+  dump_format: SFB
+  output_dir: ./io/output/imgpatch
+  output_wait_ms: 20000
