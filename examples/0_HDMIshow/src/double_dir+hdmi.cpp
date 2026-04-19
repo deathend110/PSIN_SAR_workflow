@@ -25,12 +25,15 @@ using namespace icraft::xrt;
 using namespace std::chrono_literals;
 using namespace fpai;
 
+// 匿名namespace，这里面定义的常量、函数，只在当前这个 .cpp 文件里可见。
 namespace
 {
     // HDMI 显示链路这里采用 4 个循环 buffer，和示例整体的轻量需求相匹配。
+    // constexpr：一个在编译期就确定下来的常量。
     constexpr int BUFFER_COUNT = 4;
     constexpr const char *DEFAULT_PREVIEW_WINDOW = "double_dir+hdmi_preview";
 
+    // toLower字符串转成小写
     std::string toLower(std::string value)
     {
         std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch)
@@ -39,6 +42,7 @@ namespace
     }
 
     // dump 模式下把合成好的 BGR 帧落盘，方便在 PC 或板端排查布局是否正确。
+    // const cv::Mat &frame_bgr：常量引用传参。不拷贝图像数据，函数内禁止修改
     void dumpFrame(const cv::Mat &frame_bgr, const std::string &dump_dir, size_t pair_index)
     {
         std::filesystem::create_directories(dump_dir);
@@ -123,6 +127,15 @@ namespace
     // 板端 HDMI 路径：
     // 双目录输入 actor 负责产生 RGB565 帧，
     // HDMI actor 负责从 buffer 中取出这些帧并送到显示硬件。
+    // 1. 从 config 读设备、目录、分辨率、fps、loop
+    // 2. 打开设备并拿到 fpai_device
+    // 3. 做平台相关初始化（zg 后端）
+    // 4. 创建 BufferManager 和 display_queue
+    // 5. 创建 input_actor，并绑定输出队列
+    // 6. 创建 display_actor，并绑定输入队列
+    // 7. 启动两个 actor
+    // 8. 根据 loop 选择“手动停止”或“播完自动退出”
+    // 9. 停止 actor，关闭设备，返回 0
     int runHdmi(const hdmi_show::SimpleYamlConfig &config)
     {
         const std::string device_fn = config.getString("sys.icore");
