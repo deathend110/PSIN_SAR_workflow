@@ -1,4 +1,3 @@
-﻿#include "compile_fpai_target.hpp"
 #include <icraft-backends/hostbackend/backend.h>
 #include <icraft-backends/hostbackend/utils.h>
 #include <icraft-backends/zg330backend/zg330backend.h>
@@ -34,6 +33,7 @@
 
 using namespace icraft::xrt;
 using namespace icraft::xir;
+using FPAIDevice = icraft::xrt::ZG330Device;
 
 namespace fs = std::filesystem;
 
@@ -1106,7 +1106,7 @@ namespace
     class HdmiFrameSink : public IFrameSink
     {
     public:
-        HdmiFrameSink(fpai::FPAIDevice &device, int width, int height, int fps)
+        HdmiFrameSink(FPAIDevice &device, int width, int height, int fps)
             : device_(device), width_(width), height_(height), fps_(fps)
         {
             buffer_size_ = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 2;
@@ -1139,7 +1139,7 @@ namespace
         }
 
     private:
-        fpai::FPAIDevice &device_;
+        FPAIDevice &device_;
         icraft::xrt::MemChunk display_chunk_;
         size_t buffer_size_ = 0;
         int width_ = 0;
@@ -1232,7 +1232,7 @@ int main(int argc, char **argv)
         session.apply();
         emitBackendLogIfRequested(cfg, session);
 
-        auto fpai_device = device.cast<fpai::FPAIDevice>();
+        auto fpai_device = device.cast<FPAIDevice>();
         std::unique_ptr<IFrameSink> sink;
         if (cfg.output_mode == "hdmi")
         {
