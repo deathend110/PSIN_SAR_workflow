@@ -1,6 +1,4 @@
 ﻿#include "compile_fpai_target.hpp"
-#include "pipeline/io/output/hdmi_display.hpp"
-
 #include <icraft-backends/hostbackend/backend.h>
 #include <icraft-backends/hostbackend/utils.h>
 #include <icraft-backends/zg330backend/zg330backend.h>
@@ -9,7 +7,9 @@
 #include <icraft-xrt/dev/host_device.h>
 #include <icraft-xrt/dev/zg330_device.h>
 
-#include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -1106,9 +1106,14 @@ namespace
     class HdmiFrameSink : public IFrameSink
     {
     public:
-        HdmiFrameSink(FPAIDevice &device, int width, int height, int fps)
-            : display_(0, device, width, height), fps_(fps)
+        HdmiFrameSink(fpai::FPAIDevice &device, int width, int height, int fps)
+            : device_(device), width_(width), height_(height), fps_(fps)
         {
+            buffer_size_ = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 2;
+            display_chunk_ = device_.getMemRegion("udma").malloc(buffer_size_, false);
+            spdlog::info("HDMI display buffer udma addr: {}, size: {}",
+                         display_chunk_->begin.addr(),
+                         buffer_size_);
             if (fps_ > 0)
             {
                 frame_interval_ = std::chrono::microseconds(1000000 / fps_);
@@ -1120,7 +1125,8 @@ namespace
             const auto start = std::chrono::steady_clock::now();
             cv::Mat rgb565;
             cv::cvtColor(frame_bgr, rgb565, cv::COLOR_BGR2BGR565);
-            display_.show(reinterpret_cast<int8_t *>(rgb565.data));
+            display_chunk_.write(0, reinterpret_cast<char *>(rgb565.data), buffer_size_);
+            device_.defaultRegRegion().write(DISPLAY_READ_ADDR, display_chunk_->begin.addr() >> 3);
             if (frame_interval_.count() > 0)
             {
                 const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1133,9 +1139,14 @@ namespace
         }
 
     private:
-        fpai::RGB565HDMIDisplay<FPAIDevice> display_;
+        fpai::FPAIDevice &device_;
+        icraft::xrt::MemChunk display_chunk_;
+        size_t buffer_size_ = 0;
+        int width_ = 0;
+        int height_ = 0;
         int fps_ = 0;
         std::chrono::microseconds frame_interval_{0};
+        static constexpr uint32_t DISPLAY_READ_ADDR = 0x40080054;
     };
 
     void emitBackendLogIfRequested(const AppConfig &cfg, Session &session)
@@ -1221,7 +1232,7 @@ int main(int argc, char **argv)
         session.apply();
         emitBackendLogIfRequested(cfg, session);
 
-        auto fpai_device = device.cast<FPAIDevice>();
+        auto fpai_device = device.cast<fpai::FPAIDevice>();
         std::unique_ptr<IFrameSink> sink;
         if (cfg.output_mode == "hdmi")
         {
@@ -1298,4 +1309,5 @@ int main(int argc, char **argv)
         return 2;
     }
 }
+
 

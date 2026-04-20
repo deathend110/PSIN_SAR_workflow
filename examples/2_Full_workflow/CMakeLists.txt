@@ -18,6 +18,8 @@ message(STATUS "Project binary dir: ${PROJECT_BINARY_DIR}")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_VERBOSE_MAKEFILE ON)
+file(MAKE_DIRECTORY ${PROJECT_SOURCE_DIR}/log)
 
 add_compile_definitions(USE_ZG330_BACKEND)
 
@@ -52,15 +54,6 @@ link_directories(${DEPS_DIR}/thirdparty/a)
 find_package(Icraft-HostBackend REQUIRED)
 find_package(icraft-zg330backend REQUIRED)
 
-add_executable(sar_imaging src/sar_imaging.cpp)
-target_include_directories(sar_imaging PRIVATE ${COMMON_INCLUDE_DIRS})
-target_link_libraries(sar_imaging
-    PRIVATE
-    ${OPENCV_STATIC_LIBS}
-    pthread dl zlib atomic
-    $<$<CXX_COMPILER_ID:GNU>:stdc++fs>
-)
-
 add_executable(full_workflow src/full_workflow.cpp)
 target_include_directories(full_workflow PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(full_workflow
@@ -71,4 +64,3 @@ target_link_libraries(full_workflow
     fmt pthread dl zlib ssl crypto atomic
     $<$<CXX_COMPILER_ID:GNU>:stdc++fs>
 )
-
