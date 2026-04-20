@@ -1,3 +1,4 @@
+#include "full_workflow_hdmi_display.hpp"
 #include <icraft-backends/hostbackend/backend.h>
 #include <icraft-backends/hostbackend/utils.h>
 #include <icraft-backends/zg330backend/zg330backend.h>
@@ -1107,13 +1108,8 @@ namespace
     {
     public:
         HdmiFrameSink(FPAIDevice &device, int width, int height, int fps)
-            : device_(device), width_(width), height_(height), fps_(fps)
+            : display_(0, device, width, height), fps_(fps)
         {
-            buffer_size_ = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 2;
-            display_chunk_ = device_.getMemRegion("udma").malloc(buffer_size_, false);
-            spdlog::info("HDMI display buffer udma addr: {}, size: {}",
-                         display_chunk_->begin.addr(),
-                         buffer_size_);
             if (fps_ > 0)
             {
                 frame_interval_ = std::chrono::microseconds(1000000 / fps_);
@@ -1125,8 +1121,7 @@ namespace
             const auto start = std::chrono::steady_clock::now();
             cv::Mat rgb565;
             cv::cvtColor(frame_bgr, rgb565, cv::COLOR_BGR2BGR565);
-            display_chunk_.write(0, reinterpret_cast<char *>(rgb565.data), buffer_size_);
-            device_.defaultRegRegion().write(DISPLAY_READ_ADDR, display_chunk_->begin.addr() >> 3);
+            display_.show(reinterpret_cast<int8_t *>(rgb565.data));
             if (frame_interval_.count() > 0)
             {
                 const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1139,14 +1134,9 @@ namespace
         }
 
     private:
-        FPAIDevice &device_;
-        icraft::xrt::MemChunk display_chunk_;
-        size_t buffer_size_ = 0;
-        int width_ = 0;
-        int height_ = 0;
+        full_workflow::RGB565HDMIDisplay<FPAIDevice> display_;
         int fps_ = 0;
         std::chrono::microseconds frame_interval_{0};
-        static constexpr uint32_t DISPLAY_READ_ADDR = 0x40080054;
     };
 
     void emitBackendLogIfRequested(const AppConfig &cfg, Session &session)

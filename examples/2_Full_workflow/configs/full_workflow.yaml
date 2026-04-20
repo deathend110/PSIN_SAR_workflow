@@ -64,10 +64,10 @@ pipeline:
 
 display:
   # 输出画面宽度。HDMI 推荐先用 1280x720，稳定性通常比 1080p 更好。
-  width: 1280
+  width: 1920
 
   # 输出画面高度。
-  height: 720
+  height: 1080
 
   # 输出帧率限制。0 表示不主动限帧；大于 0 时 HDMI sink 会按目标 FPS sleep。
   fps: 0
