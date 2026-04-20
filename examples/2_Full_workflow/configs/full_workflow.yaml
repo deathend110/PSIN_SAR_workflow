@@ -45,7 +45,7 @@ pipeline:
     # 当前第 0 阶段只实现 auto_snake；manual_flight 接口已在代码中预留，后续接控制端。
     mode: auto_snake
 
-    # 模型输入 patch 尺寸。当前模型固定要求 512x512。
+    # 模型输入 patch 尺寸。当前模型固定要求 512x512，输入数据为 float32 0-1。
     patch_size: 512
 
     # 自动蛇形扫描步长。256 表示横向/纵向 50% overlap，边缘不足完整 patch 的区域丢弃。

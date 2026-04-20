@@ -1,4 +1,4 @@
-﻿# examples/2_Full_workflow 使用说明
+# examples/2_Full_workflow 使用说明
 
 本工程现在只保留一个干净的完整链路程序：`full_workflow`。
 
@@ -94,7 +94,7 @@ pipeline:
 运行前确认模型输入输出满足：
 
 ```text
-input[0]  = [1,512,512,1]
+input[0]  = [1,512,512,1]   # FP32，输入值为 RD 幅值 min-max 后的 0-1 patch
 output[0] = [1,512,512,1]   # 恢复灰度图
 output[1] = [1,512,512,6]   # 分割 logits
 ```
@@ -112,9 +112,9 @@ cd examples/2_Full_workflow
 
 ```text
 1. 遍历 io/echo 下的 echo bin
-2. 使用 RD 算法生成 SAR 灰度大图
-3. 以 512x512、stride=256 自动蛇形裁 patch
-4. 构造 NHWC [1,512,512,1] 输入 tensor
+2. 使用 RD 算法生成复数 SAR 图，并对幅值做全图 min-max 得到 float32 0-1 SAR 图
+3. 以 512x512、stride=256 自动蛇形裁 float32 0-1 patch
+4. 构造 NHWC [1,512,512,1] FP32 输入 tensor
 5. 调用 icraft session.forward 推理
 6. output[0] 转恢复灰度图
 7. output[1] 对最后一维 argmax，转 RGB 分割 mask

@@ -116,7 +116,7 @@ namespace
     struct PatchPacket
     {
         PatchInfo info;
-        cv::Mat patch_u8;
+        cv::Mat patch_norm;
     };
 
     struct RuntimeState
@@ -598,7 +598,7 @@ namespace
         return dftAxis(compressed, 1, true);
     }
 
-    cv::Mat magnitudeMinMaxToU8(const cv::Mat &complex_img)
+    cv::Mat magnitudeMinMaxToNormF32(const cv::Mat &complex_img)
     {
         CV_Assert(complex_img.type() == CV_64FC2);
         cv::Mat mag(complex_img.rows, complex_img.cols, CV_64FC1);
@@ -617,19 +617,19 @@ namespace
             }
         }
 
-        cv::Mat out(complex_img.rows, complex_img.cols, CV_8UC1, cv::Scalar(0));
+        cv::Mat out(complex_img.rows, complex_img.cols, CV_32FC1, cv::Scalar(0.0f));
         if (max_val == min_val)
         {
             return out;
         }
-        const double scale = 255.0 / (max_val - min_val);
+        const double scale = 1.0 / (max_val - min_val);
         for (int r = 0; r < mag.rows; ++r)
         {
             const auto *mag_row = mag.ptr<double>(r);
-            auto *out_row = out.ptr<std::uint8_t>(r);
+            auto *out_row = out.ptr<float>(r);
             for (int c = 0; c < mag.cols; ++c)
             {
-                out_row[c] = static_cast<std::uint8_t>(std::floor((mag_row[c] - min_val) * scale));
+                out_row[c] = static_cast<float>((mag_row[c] - min_val) * scale);
             }
         }
         return out;
@@ -671,17 +671,17 @@ namespace
     class SnakePatchSource
     {
     public:
-        SnakePatchSource(cv::Mat image_u8, int patch_size, int stride)
-            : image_u8_(std::move(image_u8)), patch_size_(patch_size), stride_(stride)
+        SnakePatchSource(cv::Mat image_norm, int patch_size, int stride)
+            : image_norm_(std::move(image_norm)), patch_size_(patch_size), stride_(stride)
         {
-            if (image_u8_.empty() || image_u8_.type() != CV_8UC1)
+            if (image_norm_.empty() || image_norm_.type() != CV_32FC1)
             {
-                throw std::runtime_error("SnakePatchSource requires CV_8UC1 SAR image.");
+                throw std::runtime_error("SnakePatchSource requires CV_32FC1 normalized SAR image.");
             }
-            if (image_u8_.cols >= patch_size_ && image_u8_.rows >= patch_size_)
+            if (image_norm_.cols >= patch_size_ && image_norm_.rows >= patch_size_)
             {
-                cols_ = (image_u8_.cols - patch_size_) / stride_ + 1;
-                rows_ = (image_u8_.rows - patch_size_) / stride_ + 1;
+                cols_ = (image_norm_.cols - patch_size_) / stride_ + 1;
+                rows_ = (image_norm_.rows - patch_size_) / stride_ + 1;
                 total_ = rows_ * cols_;
             }
         }
@@ -707,7 +707,7 @@ namespace
             packet.info.width = patch_size_;
             packet.info.height = patch_size_;
             packet.info.right_to_left = right_to_left;
-            packet.patch_u8 = image_u8_(cv::Rect(x, y, patch_size_, patch_size_)).clone();
+            packet.patch_norm = image_norm_(cv::Rect(x, y, patch_size_, patch_size_)).clone();
             ++cursor_;
             return true;
         }
@@ -717,7 +717,7 @@ namespace
         int cols() const { return cols_; }
 
     private:
-        cv::Mat image_u8_;
+        cv::Mat image_norm_;
         int patch_size_ = 512;
         int stride_ = 256;
         int rows_ = 0;
@@ -729,15 +729,15 @@ namespace
     class ManualFlightPatchSource
     {
     public:
-        ManualFlightPatchSource(cv::Mat image_u8, int patch_size)
-            : image_u8_(std::move(image_u8)), patch_size_(patch_size)
+        ManualFlightPatchSource(cv::Mat image_norm, int patch_size)
+            : image_norm_(std::move(image_norm)), patch_size_(patch_size)
         {
-            if (image_u8_.cols < patch_size_ || image_u8_.rows < patch_size_)
+            if (image_norm_.cols < patch_size_ || image_norm_.rows < patch_size_)
             {
                 throw std::runtime_error("ManualFlightPatchSource image is smaller than patch size.");
             }
-            cx_ = image_u8_.cols / 2;
-            cy_ = image_u8_.rows / 2;
+            cx_ = image_norm_.cols / 2;
+            cy_ = image_norm_.rows / 2;
             clampCenter();
         }
 
@@ -757,7 +757,7 @@ namespace
             packet.info.y = cy_ - half;
             packet.info.width = patch_size_;
             packet.info.height = patch_size_;
-            packet.patch_u8 = image_u8_(cv::Rect(packet.info.x, packet.info.y, patch_size_, patch_size_)).clone();
+            packet.patch_norm = image_norm_(cv::Rect(packet.info.x, packet.info.y, patch_size_, patch_size_)).clone();
             return packet;
         }
 
@@ -765,11 +765,11 @@ namespace
         void clampCenter()
         {
             const int half = patch_size_ / 2;
-            cx_ = std::max(half, std::min(cx_, image_u8_.cols - half));
-            cy_ = std::max(half, std::min(cy_, image_u8_.rows - half));
+            cx_ = std::max(half, std::min(cx_, image_norm_.cols - half));
+            cy_ = std::max(half, std::min(cy_, image_norm_.rows - half));
         }
 
-        cv::Mat image_u8_;
+        cv::Mat image_norm_;
         int patch_size_ = 512;
         int cx_ = 0;
         int cy_ = 0;
@@ -829,24 +829,6 @@ namespace
         return session;
     }
 
-    Tensor dataToUInt8Tensor(const uint8_t *input_data, const Value &input_value)
-    {
-        TensorType out_dtype;
-        if (input_value.tensorType()->shape[0] == -1)
-        {
-            out_dtype = input_value.getUsesOp()[0]->outputs[0].tensorType().clone();
-        }
-        else
-        {
-            out_dtype = input_value.tensorType().clone();
-        }
-        const auto size = out_dtype.numElements();
-        auto param_chunk = HostDevice::MemRegion().malloc(size * sizeof(uint8_t));
-        auto *dst = reinterpret_cast<uint8_t *>(param_chunk->begin.cptr());
-        std::memcpy(dst, input_data, size * sizeof(uint8_t));
-        return Tensor(out_dtype, param_chunk);
-    }
-
     Tensor dataToFp32Tensor(const float *input_data, const Value &input_value)
     {
         TensorType out_dtype;
@@ -879,50 +861,24 @@ namespace
             }
 
             const auto storage_type = input_value_.tensorType()->element_dtype.getStorageType();
-            if (storage_type.isUInt(8))
+            if (!storage_type.isFP32())
             {
-                storage_kind_ = StorageKind::UInt8;
-            }
-            else if (storage_type.isFP32())
-            {
-                storage_kind_ = StorageKind::FP32;
-            }
-            else
-            {
-                throw std::runtime_error("Model input storage dtype must be UINT8 or FP32.");
+                throw std::runtime_error("Model input storage dtype must be FP32 for normalized 0-1 patch input.");
             }
         }
 
-        Tensor build(const cv::Mat &patch_u8) const
+        Tensor build(const cv::Mat &patch_norm) const
         {
-            if (patch_u8.empty() || patch_u8.type() != CV_8UC1 || patch_u8.rows != EXPECTED_H || patch_u8.cols != EXPECTED_W)
+            if (patch_norm.empty() || patch_norm.type() != CV_32FC1 || patch_norm.rows != EXPECTED_H || patch_norm.cols != EXPECTED_W)
             {
-                throw std::runtime_error("Patch tensor input must be CV_8UC1 512x512.");
+                throw std::runtime_error("Patch tensor input must be CV_32FC1 512x512 normalized to 0-1.");
             }
-            cv::Mat continuous = patch_u8.isContinuous() ? patch_u8 : patch_u8.clone();
-            if (storage_kind_ == StorageKind::UInt8)
-            {
-                return dataToUInt8Tensor(continuous.data, input_value_);
-            }
-
-            cv::Mat patch_f32;
-            continuous.convertTo(patch_f32, CV_32FC1);
-            if (!patch_f32.isContinuous())
-            {
-                patch_f32 = patch_f32.clone();
-            }
-            return dataToFp32Tensor(reinterpret_cast<const float *>(patch_f32.data), input_value_);
+            cv::Mat continuous = patch_norm.isContinuous() ? patch_norm : patch_norm.clone();
+            return dataToFp32Tensor(reinterpret_cast<const float *>(continuous.data), input_value_);
         }
 
     private:
-        enum class StorageKind
-        {
-            UInt8,
-            FP32
-        };
-
         Value input_value_;
-        StorageKind storage_kind_ = StorageKind::UInt8;
     };
 
     void validateNetworkIO(const NetworkView &network_view)
@@ -1161,7 +1117,7 @@ namespace
         state.patch = packet.info;
         const auto patch_start = std::chrono::steady_clock::now();
 
-        Tensor input_tensor = tensor_builder.build(packet.patch_u8);
+        Tensor input_tensor = tensor_builder.build(packet.patch_norm);
         const auto infer_start = std::chrono::steady_clock::now();
         auto host_outputs = runner.forward(input_tensor);
         const auto infer_end = std::chrono::steady_clock::now();
@@ -1248,11 +1204,11 @@ int main(int argc, char **argv)
             spdlog::info("Processing echo [{}/{}]: {}", base_state.echo_index, base_state.echo_count, echo_path.string());
             const ComplexImage echo = loadEchoBin(echo_path);
             const cv::Mat sar_complex = runImaging(echo.data, radar_cfg);
-            const cv::Mat sar_u8 = magnitudeMinMaxToU8(sar_complex);
+            const cv::Mat sar_norm = magnitudeMinMaxToNormF32(sar_complex);
             base_state.rd_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rd_start).count();
-            spdlog::info("RD imaging done for {}, SAR={}x{}, rd={:.2f}ms", base_state.echo_stem, sar_u8.cols, sar_u8.rows, base_state.rd_ms);
+            spdlog::info("RD imaging done for {}, SAR={}x{}, rd={:.2f}ms", base_state.echo_stem, sar_norm.cols, sar_norm.rows, base_state.rd_ms);
 
-            if (sar_u8.cols < cfg.patch_size || sar_u8.rows < cfg.patch_size)
+            if (sar_norm.cols < cfg.patch_size || sar_norm.rows < cfg.patch_size)
             {
                 spdlog::warn("Skip {} because SAR image is smaller than 512x512.", base_state.echo_stem);
                 continue;
@@ -1262,7 +1218,7 @@ int main(int argc, char **argv)
                 throw std::runtime_error("Only pipeline.patch.mode=auto_snake is implemented in stage 0.");
             }
 
-            SnakePatchSource patch_source(sar_u8, cfg.patch_size, cfg.stride);
+            SnakePatchSource patch_source(sar_norm, cfg.patch_size, cfg.stride);
             spdlog::info("Patch grid for {}: rows={}, cols={}, total={}",
                          base_state.echo_stem,
                          patch_source.rows(),
