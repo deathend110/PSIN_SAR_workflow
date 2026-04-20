@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import cupy as cp
+# import cupy as np
 import tifffile as tiff
 import imageio.v2 as imageio
 from pathlib import Path
@@ -12,6 +12,9 @@ import cv2 as cv
 from skimage import color
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 import gc
+import random
+seed = int(42)
+random.seed(seed)
 
 def calc_metrics(img_ref, img_pred):
     # PSNR
@@ -71,7 +74,7 @@ class MotionSimulator:
         self.r = radar_cfg
         self.m = motion_cfg
 
-    def generate_trajectory(self, na: int) -> Tuple[cp.ndarray, cp.ndarray]:
+    def generate_trajectory(self, na: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         生成平台轨迹。
         如果 motion_blur_enable 为 False，则返回理想的线性轨迹。
@@ -84,7 +87,7 @@ class MotionSimulator:
             # 理想位移 x = v * t，并做中心化处理
             x_actual = self.r.v_platform * t_a
             x_actual -= x_actual[na // 2]
-            return cp.asarray(x_actual, dtype=cp.float32), cp.asarray(v_actual, dtype=cp.float32)
+            return np.asarray(x_actual, dtype=np.float32), np.asarray(v_actual, dtype=np.float32)
 
         # 干扰情况：生成相关噪声扰动
         alpha = np.exp(-1.0 / self.m.correlation_length)
@@ -133,7 +136,7 @@ class MotionSimulator:
             x_actual = np.cumsum(v_actual * dt)
 
         x_actual -= x_actual[na // 2]
-        return cp.asarray(x_actual, dtype=cp.float32), cp.asarray(v_actual, dtype=cp.float32)
+        return np.asarray(x_actual, dtype=np.float32), np.asarray(v_actual, dtype=np.float32)
 
 # ==========================================
 # 3. SAR 核心处理模块
@@ -145,14 +148,14 @@ class SARProcessor:
         self.cfg = cfg
 
     def _get_f_axes(self, nr: int, na: int):
-        f_r = cp.fft.fftshift(cp.fft.fftfreq(nr, d=1/self.cfg.Fs))
-        f_a = cp.fft.fftshift(cp.fft.fftfreq(na, d=1/self.cfg.PRF))
+        f_r = np.fft.fftshift(np.fft.fftfreq(nr, d=1/self.cfg.Fs))
+        f_a = np.fft.fftshift(np.fft.fftfreq(na, d=1/self.cfg.PRF))
         return f_r, f_a
 
-    def vectorized_rcmc(self, data_fa: cp.ndarray, f_a: cp.ndarray, v_actual: cp.ndarray, inverse=False):
+    def vectorized_rcmc(self, data_fa: np.ndarray, f_a: np.ndarray, v_actual: np.ndarray, inverse=False):
         """全向量化距离徙动处理"""
         nr, na = data_fa.shape
-        r_idx = cp.arange(nr, dtype=cp.float32)
+        r_idx = np.arange(nr, dtype=np.float32)
         delta_r = self.cfg.c / (2 * self.cfg.Fs)
 
         # 使用实际速度计算徙动量
@@ -162,60 +165,60 @@ class SARProcessor:
         map_r = r_idx[:, None] + \
             (shift[None, :] if not inverse else -shift[None, :])
 
-        idx0 = cp.floor(map_r).astype(cp.int32)
+        idx0 = np.floor(map_r).astype(np.int32)
         w = map_r - idx0
         valid = (idx0 >= 0) & (idx0 < nr - 1)
 
-        output = cp.zeros_like(data_fa)
-        col_indices = cp.tile(cp.arange(na), (nr, 1))
+        output = np.zeros_like(data_fa)
+        col_indices = np.tile(np.arange(na), (nr, 1))
 
         output[valid] = (1 - w[valid]) * data_fa[idx0[valid], col_indices[valid]] + \
             w[valid] * data_fa[idx0[valid] + 1, col_indices[valid]]
         return output
 
-    def run_inverse(self, patch: np.ndarray, v_actual: cp.ndarray) -> np.ndarray:
+    def run_inverse(self, patch: np.ndarray, v_actual: np.ndarray) -> np.ndarray:
         """从图像反演回波"""
-        data = cp.asarray(patch, dtype=cp.complex64)
+        data = np.asarray(patch, dtype=np.complex64)
         nr, na = data.shape
         f_r, f_a = self._get_f_axes(nr, na)
 
         # 方位向处理
-        data_fa = cp.fft.fftshift(cp.fft.fft(
-            cp.fft.fftshift(data, 1), axis=1), 1)
+        data_fa = np.fft.fftshift(np.fft.fft(
+            np.fft.fftshift(data, 1), axis=1), 1)
         Ka = 2 * v_actual.mean()**2 / (self.cfg.lam * self.cfg.R0)
-        Ha_conj = cp.exp(1j * cp.pi * f_a**2 / Ka)
+        Ha_conj = np.exp(1j * np.pi * f_a**2 / Ka)
 
         # 逆 RCMC
         data_ircmc = self.vectorized_rcmc(
             data_fa * Ha_conj[None, :], f_a, v_actual, inverse=True)
-        data_az_decomp = cp.fft.ifft(cp.fft.ifftshift(data_ircmc, 1), axis=1)
+        data_az_decomp = np.fft.ifft(np.fft.ifftshift(data_ircmc, 1), axis=1)
 
         # 距离向处理
-        Hr_conj = cp.exp(1j * cp.pi * f_r**2 / self.cfg.gamma)
-        echo = cp.fft.ifft(cp.fft.ifftshift(cp.fft.fft(cp.fft.fftshift(
+        Hr_conj = np.exp(1j * np.pi * f_r**2 / self.cfg.gamma)
+        echo = np.fft.ifft(np.fft.ifftshift(np.fft.fft(np.fft.fftshift(
             data_az_decomp, 0), axis=0) * Hr_conj[:, None], 0), axis=0)
 
         return echo
 
-    def run_imaging(self, data: cp.ndarray, v_actual: cp.ndarray) -> np.ndarray:
+    def run_imaging(self, data: np.ndarray, v_actual: np.ndarray) -> np.ndarray:
             """
             统一成像接口
             :param data: 回波数据 (cupy array)
             :param v_actual: 实际方位向速度轨迹 (cupy array)
             """
-            # data = cp.asarray(data, dtype=cp.complex64)
+            # data = np.asarray(data, dtype=np.complex64)
             nr, na = data.shape
             f_r, f_a = self._get_f_axes(nr, na)
 
             # --- 标准 16bit 距离压缩 ---
-            Hr = cp.exp(-1j * cp.pi * f_r**2 / self.cfg.gamma)
-            data_rc = cp.fft.ifft(cp.fft.fftshift(cp.fft.fft(cp.fft.fftshift(data, 0), axis=0), 0) * Hr[:, None], axis=0)
+            Hr = np.exp(-1j * np.pi * f_r**2 / self.cfg.gamma)
+            data_rc = np.fft.ifft(np.fft.fftshift(np.fft.fft(np.fft.fftshift(data, 0), axis=0), 0) * Hr[:, None], axis=0)
 
             # --- 后续 RD 算法流程 (16bit/1bit 通用) ---
             
             # 1. 方位向 FFT
-            data_fa = cp.fft.fftshift(cp.fft.fft(
-                cp.fft.fftshift(data_rc, 1), axis=1), 1)
+            data_fa = np.fft.fftshift(np.fft.fft(
+                np.fft.fftshift(data_rc, 1), axis=1), 1)
             
             # 2. 距离徙动校正 (RCMC)
             data_rcmc = self.vectorized_rcmc(data_fa, f_a, v_actual)
@@ -223,11 +226,11 @@ class SARProcessor:
             # 3. 方位压缩
             # 使用平均速度计算方位向调频率 Ka
             Ka = 2 * self.cfg.v_platform**2 / (self.cfg.lam * self.cfg.R0)
-            Ha = cp.exp(-1j * cp.pi * f_a**2 / Ka)
-            img = cp.fft.ifft(cp.fft.ifftshift(data_rcmc * Ha[None, :], 1), axis=1)
+            Ha = np.exp(-1j * np.pi * f_a**2 / Ka)
+            img = np.fft.ifft(np.fft.ifftshift(data_rcmc * Ha[None, :], 1), axis=1)
 
             # 返回complex的img
-            return cp.asnumpy(img)
+            return img
     
 
 # ==========================================
@@ -245,7 +248,7 @@ class SARVideoPipeline:
 
     def gaussian_noisy(self, signal, factor):
         # 正确计算回波幅度
-        sigma = cp.std(cp.abs(signal))
+        sigma = np.std(np.abs(signal))
 
         # 设置阈值幅度 (As = 1.4 * σ)
         target_noise_std = factor * sigma
@@ -253,15 +256,15 @@ class SARVideoPipeline:
         # 3. 设定伸缩因子
         # 这里的关键是除以 sqrt(2)，因为复数高斯噪声由实部和虚部组成。
         # 若实部和虚部均服从 N(0, σ^2/2)，则总复数方差才是 σ^2
-        scale_factor = target_noise_std / cp.sqrt(2.0)
+        scale_factor = target_noise_std / np.sqrt(2.0)
         
         # 4. 生成复高斯白噪声
-        # cp.random.randn 生成标准正态分布 (均值0，方差1)
+        # np.random.randn 生成标准正态分布 (均值0，方差1)
         # *signal.shape 可以完美适配 1D, 2D 甚至 N 维度的信号矩阵
-        noise = scale_factor * (cp.random.randn(*signal.shape) + 1j * cp.random.randn(*signal.shape))
+        noise = scale_factor * (np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape))
         
         # 强制让噪声均值为 0 (对应 MATLAB 的 mean(Noise, "all"))
-        noise = noise - cp.mean(noise)
+        noise = noise - np.mean(noise)
         
         # 5. 叠加噪声
         signal_noisy = signal + noise
@@ -281,7 +284,7 @@ class SARVideoPipeline:
         H, W = img.shape
         ph, pw = patch_size
         stride = int(pw * stride_rate)
-        # 每行不重叠
+        # 每行重叠
         ph_stride = int(ph)
         
         i = 0
@@ -302,20 +305,99 @@ class SARVideoPipeline:
         os.makedirs(output_dir, exist_ok=True)
         imageio.imwrite(save_path, img)
 
+    def save_complex_to_binary(self, data, filepath):
+        """
+        将复数数据保存为二进制文件，使用单精度浮点型和小端序
+        
+        Args:
+            data: 复数数组 (numpy array with complex values)
+            filepath: 保存的文件路径
+            size_h: 数据高度（可选，如果不提供则使用data.shape[0]）
+            size_w: 数据宽度（可选，如果不提供则使用data.shape[1]）
+        """
+        # 数据的实际形状
+        size_h, size_w = data.shape
+        
+        # 确保数据类型为复数64位
+        data = data.astype(np.complex64)
+        
+        # 分离实部和虚部
+        real_part = data.real.astype('<f4')  # 单精度浮点型，小端序
+        imag_part = data.imag.astype('<f4')  # 单精度浮点型，小端序
+        
+        # 将实部和虚部交替排列成一维数组
+        interleaved_data = np.empty(2 * real_part.size, dtype='<f4')
+        interleaved_data[0::2] = real_part.ravel()
+        interleaved_data[1::2] = imag_part.ravel()
+        
+        # 保存为二进制文件，先写入尺寸信息，再写入数据
+        with open(filepath, 'wb') as f:
+            # 写入尺寸信息（使用小端序的int32格式）
+            f.write(np.array([size_h], dtype='<i4').tobytes())
+            f.write(np.array([size_w], dtype='<i4').tobytes())
+            # 写入实际的复数数据
+            f.write(interleaved_data.tobytes())
+        
+        print(f"复数数据已保存为二进制文件: {filepath}")
+        print(f"数据形状: {size_h} x {size_w}, 存储数据长度: {len(interleaved_data)}, 数据类型: {interleaved_data.dtype}")
 
-    def clear_cupy_memory(self):
-        gc.collect()
-        cp.get_default_memory_pool().free_all_blocks()
-        cp.get_default_pinned_memory_pool().free_all_blocks()
 
-    def run(self, input_dir: str, output_dir: str, patch_size=(512, 512), stride_rate=0.5):
+    def load_complex_from_binary(self, filepath, shape=None):
+        """
+        从二进制文件加载复数数据
+        
+        Args:
+            filepath: 二进制文件路径
+            shape: 原始数据的形状（可选，如果不提供则从文件头读取尺寸信息）
+        Returns:
+            重新构建的复数数组
+        """
+        with open(filepath, 'rb') as f:
+            # 先读取尺寸信息
+            size_h_bytes = f.read(4)  # 读取4字节的height
+            size_w_bytes = f.read(4)  # 读取4字节的width
+            
+            # 转换为numpy数组获取尺寸
+            size_h = np.frombuffer(size_h_bytes, dtype='<i4')[0]
+            size_w = np.frombuffer(size_w_bytes, dtype='<i4')[0]
+            
+            # 检查shape参数是否与文件中的尺寸信息一致
+            if shape is not None:
+                if shape != (size_h, size_w):
+                    print(f"警告: 文件中的尺寸信息 ({size_h}, {size_w}) 与提供的shape {shape} 不一致")
+            
+            # 读取剩余的复数数据
+            remaining_data = f.read()
+        
+        # 转换为numpy数组（单精度浮点型，小端序）
+        flat_data = np.frombuffer(remaining_data, dtype='<f4')
+        
+        # 计算预期的数据量（实部和虚部各占一半）
+        expected_size = 2 * size_h * size_w
+        
+        if len(flat_data) != expected_size:
+            raise ValueError(f"文件大小不匹配: 期望 {expected_size}, 实际 {len(flat_data)}")
+        
+        # 重新确定shape
+        final_shape = (size_h, size_w)
+        
+        # 提取实部和虚部
+        real_part = flat_data[0::2].reshape(final_shape)
+        imag_part = flat_data[1::2].reshape(final_shape)
+        
+        # 重构复数数组
+        complex_data = real_part + 1j * imag_part
+        
+        return complex_data
+
+    def run(self, input_dir: str, output_dir: str, patch_size=(512, 512), stride_rate=0.75):
         '''
         一次读取直接生成三个，gt_16bit gt_16bit_noisy lq_1bit
         '''
         tif_files = sorted([str(p) for p in Path(input_dir).glob("*.tif*")])
         for tif_path in tqdm(tif_files, desc="Processing Files", ncols=100):
             # 0 清显存CUDA
-            self.clear_cupy_memory()
+            # self.clear_cupy_memory()
 
             # 1 一次读一张完整的img图，反演回信号echo
             img = tiff.imread(tif_path)
@@ -332,7 +414,11 @@ class SARVideoPipeline:
             factor = 1
             echo = self.processor.run_inverse(img_c, v_act)
             echo_noisy = self.gaussian_noisy(echo, factor=factor)
-            echo_noisy_1bit = cp.sign(cp.real(echo_noisy)) + 1j * cp.sign(cp.imag(echo_noisy))
+            echo_noisy_1bit = np.sign(np.real(echo_noisy)) + 1j * np.sign(np.imag(echo_noisy))
+            # 保存回波
+            echo_name = Path(tif_path).stem + "_echo_1bit.bin"
+            echo_path = Path(output_dir) / echo_name
+            self.save_complex_to_binary(echo_noisy_1bit, echo_path)
 
             # 3. 生成RD图
             img_rec = self.processor.run_imaging(echo, v_act)
@@ -367,7 +453,7 @@ class SARVideoPipeline:
 
 if __name__ == "__main__":
     '''
-    1024版本
+    生成用于模型前处理模拟的完整的1bitRD大图
     '''
     # 配置理想环境：关闭运动模糊，关闭噪声
     r_cfg = RadarConfig(noise_enable=False, snr_db=4)  # 注入回波噪声以增加真实感
@@ -376,15 +462,15 @@ if __name__ == "__main__":
     pipeline = SARVideoPipeline(r_cfg, m_cfg, black_frame_threshold=0.2,)
     
     
-    mode = "test"
-    input_dir = "G:\VSCODE-G\AIRPolarSARSeg_process\AIRPolarSARSeg"
+    # mode = "test"
+    input_dir = r"G:\VSCODE-G\AIRPolarSARSeg_process\AIRPolarSARSeg"
     # input_dir = input_dir.replace("tmp", mode)
     input_dir = Path(input_dir)
     input_dir.mkdir(parents=True, exist_ok=True)
 
     # 输出目录，分为trian，test，val
     # 会自动在目录下生成：gt_16bit gt_16bit_noisy lq_1bit
-    output_dir = "/root/autodl-tmp/AIRPolarSARSeg_process/Data"
+    output_dir = f"G:\VSCODE-G\AIRPolarSARSeg_process\Data_seed{seed}"
     # output_dir = output_dir.replace("tmp", mode)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

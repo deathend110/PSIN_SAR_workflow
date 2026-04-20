@@ -1,0 +1,11 @@
+input:
+  echo_dir: ./io/echo
+  ext: .bin
+
+output:
+  sar_img_dir: ./io/sar_img
+  ext: .png
+
+runtime:
+  recursive: false
+  overwrite: true

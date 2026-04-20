@@ -1,0 +1,10 @@
+你现在通读examples下的三个工程,这三个工程分别完成了HDMI输出,加载切分号的patch并模型推理后处理,从回波开始真正的前处理.
+我需要你组合起来形成完整的工作流,落地在2_Full_workflow
+整体流程:
+1.读取examples\2_Full_workflow\io\echo的回波,RD成像,参数维持examples\2_Full_workflow\src\sar_imaging.cpp的参数.
+2.先做自动蛇形扫描,以256的步长自动裁切512的图,输入模型推理.预留"手动无人机巡航"的接口
+3.参考examples\1_input_ai_save的后处理逻辑,读取模型输入的1x512x512x1的恢复灰度图和1x512x512x6的分割mask,对分割mask做RGB化
+4.将后处理完毕的两张图打包好,按照examples\0_HDMIshow类似的逻辑送入HDMI进行显示
+5.整体项目保存两种编译平台,若是win下编译就不执行HDMI输出,换位保存png图到examples\2_Full_workflow\io\output中,若是linux编译则执行HDMI,不保存png输出.
+6.现在是没有控制端的直接启动的程序,写个yaml配置文件控制.为了后续添加examples\2_Full_workflow\Host Computer Software设计.md中的设计,要考虑扩展接口,整体的代码框架设计.
+7.现在的工作可以说是第0阶段,正式接通全部的section,HDMI简单输出两张图并列的形式就行

@@ -1,0 +1,89 @@
+﻿# full_workflow.yaml
+# 第 0 阶段完整链路配置：echo 回波 -> RD SAR 成像 -> patch 推理 -> 后处理 -> HDMI/PNG 输出
+# 建议从 examples/2_Full_workflow 目录下运行程序，这样 ./io、./imodel 等相对路径才会正确。
+
+sys:
+  # ZG330 设备 URL。
+  # axi:// 表示板端 AXI 方式访问；npu/dma 地址保持和当前板卡 bitstream/驱动一致。
+  device: axi://zg330aiu?npu=0x40000000&dma=0x80000000
+
+  # 推理后端。第 0 阶段主要使用 zg330；host 只作为接口保留，不用于 HDMI 上板流程。
+  run_backend: zg330
+
+  # MMU 开关。沿用现有 ZG 示例配置，通常保持 true。
+  mmuMode: true
+
+  # 是否开启算子连贯执行/速度优化。
+  # false 时会调用 disableMergeHardOp，便于调试；追求性能时可尝试 true。
+  speedMode: false
+
+  # 是否开启/保留 FTMP 压缩或 ETM 内存优化相关行为。
+  # false 时当前代码会调用 disableEtmOptimize，便于生成更直观的内存日志。
+  compressFtmp: false
+
+  # OCM 优化方案：
+  # 0=关闭 OCM；1=方案1；2=方案2；3=方案3；4=后端默认/自动选择。
+  ocm_option: 1
+
+  # 是否开启 session 内部耗时统计。
+  # 后续性能页/telemetry 可以读取这些 profiling 结果。
+  profile: false
+
+input:
+  # echo 回波 bin 文件目录。程序会按文件名排序逐个处理。
+  echo_dir: ./io/echo
+
+  # echo 文件扩展名。默认只读取 .bin。
+  echo_ext: .bin
+
+  # 是否递归遍历 echo_dir 的子目录。
+  recursive: false
+
+pipeline:
+  patch:
+    # patch 输入模式。
+    # 当前第 0 阶段只实现 auto_snake；manual_flight 接口已在代码中预留，后续接控制端。
+    mode: auto_snake
+
+    # 模型输入 patch 尺寸。当前模型固定要求 512x512。
+    patch_size: 512
+
+    # 自动蛇形扫描步长。256 表示横向/纵向 50% overlap，边缘不足完整 patch 的区域丢弃。
+    stride: 256
+
+  icore:
+    # icraft generate 阶段生成的模型 json。
+    json: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_generated.json
+
+    # icraft generate 阶段生成的模型 raw。
+    raw: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_generated.raw
+
+  # 每个输出 tensor 等待 ready 的最长时间，单位毫秒。
+  # 这里是超时保护，不代表每次都会等待这么久。
+  output_wait_ms: 20000
+
+display:
+  # 输出画面宽度。HDMI 推荐先用 1280x720，稳定性通常比 1080p 更好。
+  width: 1280
+
+  # 输出画面高度。
+  height: 720
+
+  # 输出帧率限制。0 表示不主动限帧；大于 0 时 HDMI sink 会按目标 FPS sleep。
+  fps: 0
+
+output:
+  # 输出模式：
+  # hdmi = 直接送 HDMI 显示；png = 在板端保存 PNG 调试图，不走 HDMI。
+  mode: hdmi
+
+  # png 模式下的输出目录。实际路径为：dir/<echo_stem>/patch_000000.png。
+  dir: ./io/output
+
+  # png 模式下如果目标文件已存在，是否覆盖。
+  overwrite: true
+
+debug:
+  # 是否在 session.apply() 后调用 ZG330Backend::log()。
+  # true 时会在 .icraft/logs 下生成后端部署/内存优化日志，包括 generate_memopt.log。
+  dump_backend_log: true
