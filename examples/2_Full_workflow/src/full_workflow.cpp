@@ -14,16 +14,19 @@
 
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -45,6 +48,20 @@ namespace
     constexpr int EXPECTED_W = 512;
     constexpr int EXPECTED_C = 1;
     constexpr int SEG_CLASSES = 6;
+
+    const char *g_runtime_stage = "startup";
+
+    void setStage(const char *stage)
+    {
+        g_runtime_stage = stage;
+        spdlog::info("[stage] {}", stage);
+    }
+
+    void handleSegfault(int)
+    {
+        std::fprintf(stderr, "\n[fatal] Segmentation fault near stage: %s\n", g_runtime_stage);
+        std::_Exit(139);
+    }
 
     struct RadarConfig
     {
@@ -78,8 +95,8 @@ namespace
         int ocm_option = 1;
         bool enable_profile = false;
 
-        fs::path echo_dir = "./io/echo";
-        std::string echo_ext = ".bin";
+        fs::path sar_img_dir = "./io/sar_img";
+        std::string sar_img_ext = ".png";
         bool recursive = false;
 
         std::string patch_mode = "auto_snake";
@@ -270,8 +287,8 @@ namespace
         cfg.ocm_option = intValueOr(values, "sys.ocm_option", cfg.ocm_option);
         cfg.enable_profile = boolValueOr(values, "sys.profile", cfg.enable_profile);
 
-        cfg.echo_dir = valueOr(values, "input.echo_dir", cfg.echo_dir.string());
-        cfg.echo_ext = valueOr(values, "input.echo_ext", cfg.echo_ext);
+        cfg.sar_img_dir = valueOr(values, "input.sar_img_dir", cfg.sar_img_dir.string());
+        cfg.sar_img_ext = valueOr(values, "input.sar_img_ext", cfg.sar_img_ext);
         cfg.recursive = boolValueOr(values, "input.recursive", cfg.recursive);
 
         cfg.patch_mode = valueOr(values, "pipeline.patch.mode", cfg.patch_mode);
@@ -290,9 +307,9 @@ namespace
         cfg.overwrite = boolValueOr(values, "output.overwrite", cfg.overwrite);
         cfg.dump_backend_log = boolValueOr(values, "debug.dump_backend_log", cfg.dump_backend_log);
 
-        if (!cfg.echo_ext.empty() && cfg.echo_ext.front() != '.')
+        if (!cfg.sar_img_ext.empty() && cfg.sar_img_ext.front() != '.')
         {
-            cfg.echo_ext = "." + cfg.echo_ext;
+            cfg.sar_img_ext = "." + cfg.sar_img_ext;
         }
         if (cfg.patch_size != EXPECTED_H || cfg.patch_size != EXPECTED_W)
         {
@@ -635,18 +652,18 @@ namespace
         return out;
     }
 
-    std::vector<fs::path> collectEchoBins(const AppConfig &cfg)
+    std::vector<fs::path> collectSarImages(const AppConfig &cfg)
     {
-        if (!fs::exists(cfg.echo_dir) || !fs::is_directory(cfg.echo_dir))
+        if (!fs::exists(cfg.sar_img_dir) || !fs::is_directory(cfg.sar_img_dir))
         {
-            throw std::runtime_error("Input echo directory does not exist: " + cfg.echo_dir.string());
+            throw std::runtime_error("Input SAR image directory does not exist: " + cfg.sar_img_dir.string());
         }
 
         std::vector<fs::path> files;
-        const auto wanted_ext = toLower(cfg.echo_ext);
+        const auto wanted_ext = toLower(cfg.sar_img_ext);
         if (cfg.recursive)
         {
-            for (const auto &entry : fs::recursive_directory_iterator(cfg.echo_dir))
+            for (const auto &entry : fs::recursive_directory_iterator(cfg.sar_img_dir))
             {
                 if (entry.is_regular_file() && toLower(entry.path().extension().string()) == wanted_ext)
                 {
@@ -656,7 +673,7 @@ namespace
         }
         else
         {
-            for (const auto &entry : fs::directory_iterator(cfg.echo_dir))
+            for (const auto &entry : fs::directory_iterator(cfg.sar_img_dir))
             {
                 if (entry.is_regular_file() && toLower(entry.path().extension().string()) == wanted_ext)
                 {
@@ -666,6 +683,18 @@ namespace
         }
         std::sort(files.begin(), files.end());
         return files;
+    }
+
+    cv::Mat loadSarImageNorm(const fs::path &path)
+    {
+        cv::Mat gray = cv::imread(path.string(), cv::IMREAD_GRAYSCALE);
+        if (gray.empty())
+        {
+            throw std::runtime_error("Failed to read SAR image: " + path.string());
+        }
+        cv::Mat norm;
+        gray.convertTo(norm, CV_32FC1, 1.0 / 255.0);
+        return norm;
     }
 
     class SnakePatchSource
@@ -1101,6 +1130,11 @@ namespace
         {
             return;
         }
+        if (session->backends.empty())
+        {
+            throw std::runtime_error("Cannot dump backend log because session has no backend.");
+        }
+        setStage("dump ZG330 backend log");
         auto zg_backend = session->backends[0].cast<icraft::xrt::zg330::ZG330Backend>();
         zg_backend.log();
         spdlog::info("ZG330 backend log requested. Check .icraft/logs for generate_memopt.log.");
@@ -1158,55 +1192,75 @@ int main(int argc, char **argv)
     bool device_open = false;
     try
     {
+        std::signal(SIGSEGV, handleSegfault);
         spdlog::set_level(spdlog::level::info);
-        const AppConfig cfg = loadConfig(argv[1]);
-        const auto echo_files = collectEchoBins(cfg);
-        if (echo_files.empty())
-        {
-            throw std::runtime_error("No echo bin files found in: " + cfg.echo_dir.string());
-        }
 
+        setStage("load config");
+        const AppConfig cfg = loadConfig(argv[1]);
+        spdlog::info("Config loaded: output.mode={}, sar_img_dir={}, model_json={}",
+                     cfg.output_mode,
+                     cfg.sar_img_dir.string(),
+                     cfg.json_path);
+
+        setStage("collect SAR images");
+        const auto sar_files = collectSarImages(cfg);
+        if (sar_files.empty())
+        {
+            throw std::runtime_error("No SAR image files found in: " + cfg.sar_img_dir.string());
+        }
+        spdlog::info("Found {} SAR image file(s).", sar_files.size());
+
+        setStage("open device");
         device = Device::Open(cfg.device_url.c_str());
         device_open = true;
+
+        setStage("load network json/raw");
         auto network = loadNetwork(cfg.json_path, cfg.raw_path);
+
+        setStage("create network view");
         auto network_view = network.view(0);
+
+        setStage("validate network IO");
         validateNetworkIO(network_view);
         PatchTensorBuilder tensor_builder(network_view);
 
+        setStage("init session");
         auto session = initSession(cfg, network_view, device);
         session.enableTimeProfile(cfg.enable_profile);
+
+        setStage("session apply");
         session.apply();
+        spdlog::info("Session apply finished.");
+
         emitBackendLogIfRequested(cfg, session);
 
-        auto fpai_device = device.cast<FPAIDevice>();
+        setStage("create output sink");
         std::unique_ptr<IFrameSink> sink;
+        std::optional<FPAIDevice> fpai_device;
         if (cfg.output_mode == "hdmi")
         {
-            sink = std::make_unique<HdmiFrameSink>(fpai_device, cfg.display_width, cfg.display_height, cfg.display_fps);
+            fpai_device.emplace(device.cast<FPAIDevice>());
+            sink = std::make_unique<HdmiFrameSink>(*fpai_device, cfg.display_width, cfg.display_height, cfg.display_fps);
         }
         else
         {
             sink = std::make_unique<PngFrameSink>(cfg.output_dir, cfg.overwrite);
         }
 
+        setStage("create inference runner");
         PatchInferenceRunner runner(session, device, cfg.output_wait_ms);
-        const RadarConfig radar_cfg;
 
-        for (size_t echo_idx = 0; echo_idx < echo_files.size(); ++echo_idx)
+        for (size_t sar_idx = 0; sar_idx < sar_files.size(); ++sar_idx)
         {
-            const auto &echo_path = echo_files[echo_idx];
+            const auto &sar_path = sar_files[sar_idx];
             RuntimeState base_state;
-            base_state.echo_stem = echo_path.stem().string();
-            base_state.echo_index = static_cast<int>(echo_idx + 1);
-            base_state.echo_count = static_cast<int>(echo_files.size());
+            base_state.echo_stem = sar_path.stem().string();
+            base_state.echo_index = static_cast<int>(sar_idx + 1);
+            base_state.echo_count = static_cast<int>(sar_files.size());
 
-            const auto rd_start = std::chrono::steady_clock::now();
-            spdlog::info("Processing echo [{}/{}]: {}", base_state.echo_index, base_state.echo_count, echo_path.string());
-            const ComplexImage echo = loadEchoBin(echo_path);
-            const cv::Mat sar_complex = runImaging(echo.data, radar_cfg);
-            const cv::Mat sar_norm = magnitudeMinMaxToNormF32(sar_complex);
-            base_state.rd_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rd_start).count();
-            spdlog::info("RD imaging done for {}, SAR={}x{}, rd={:.2f}ms", base_state.echo_stem, sar_norm.cols, sar_norm.rows, base_state.rd_ms);
+            spdlog::info("Processing SAR image [{}/{}]: {}", base_state.echo_index, base_state.echo_count, sar_path.string());
+            const cv::Mat sar_norm = loadSarImageNorm(sar_path);
+            spdlog::info("Loaded SAR image {}, size={}x{}, dtype=CV_32FC1, range=0-1", base_state.echo_stem, sar_norm.cols, sar_norm.rows);
 
             if (sar_norm.cols < cfg.patch_size || sar_norm.rows < cfg.patch_size)
             {

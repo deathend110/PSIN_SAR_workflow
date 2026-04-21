@@ -1,0 +1,32 @@
+# rd_imaging.yaml
+# 独立 RD 成像程序配置：echo 回波 bin -> SAR 灰度 PNG。
+# 建议从 examples/2_Full_workflow 目录运行，这样相对路径会指向当前工程目录。
+
+rd:
+  # 输入 echo 回波目录。程序会按文件名排序逐个处理。
+  echo_dir: ./io/echo
+
+  # 输入文件扩展名。
+  echo_ext: .bin
+
+  # SAR 成像 PNG 输出目录。输出文件名保持 echo 文件 stem，例如 xxx.bin -> xxx.png。
+  output_dir: ./io/sar_img
+
+  # RD 分块处理使用的磁盘临时目录。
+  # 该目录需要有足够空间保存两个大 scratch 文件，处理完成后默认自动删除。
+  scratch_dir: ./io/rd_scratch
+
+  # 距离向处理和 RCMC 每次处理的方位列数。
+  # 64 是保守默认值，优先避免 1GB 内存板端 OOM。
+  column_tile: 64
+
+  # 方位 FFT / 方位压缩每次处理的距离行数。
+  # 128 是保守默认值，速度和内存占用比较均衡。
+  row_tile: 128
+
+  # 是否保留 scratch 文件用于调试。
+  # false 表示处理完成后删除临时文件。
+  keep_scratch: false
+
+  # 输出 PNG 已存在时是否覆盖。
+  overwrite: true

@@ -3,7 +3,7 @@
 本工程现在只保留一个干净的完整链路程序：`full_workflow`。
 
 ```text
-echo 回波 bin -> RD SAR 成像 -> 512x512 patch 蛇形扫描 -> icraft 模型推理 -> 后处理 -> HDMI/PNG 输出
+SAR 图片 -> 512x512 patch 蛇形扫描 -> icraft 模型推理 -> 后处理 -> HDMI/PNG 输出
 ```
 
 当前只面向 Linux/ZG 板端编译运行，不维护 Windows 编译路径。输出方式由 `configs/full_workflow.yaml` 控制：可以直接送 HDMI，也可以在板端保存 PNG 调试图。
@@ -67,19 +67,19 @@ chmod +x build/ZG/full_workflow
 
 ## 3. 准备输入
 
-把 echo 回波 bin 放入：
+把已经 RD 成像好的 SAR 图片放入：
 
 ```text
-io/echo
+io/sar_img
 ```
 
 程序会按文件名排序逐个处理，例如：
 
 ```text
-io/echo/1_hh_amp_echo_1bit.bin
-io/echo/1_hv_amp_echo_1bit.bin
-io/echo/1_vh_amp_echo_1bit.bin
-io/echo/1_vv_amp_echo_1bit.bin
+io/sar_img/1_hh_amp_echo_1bit.png
+io/sar_img/1_hv_amp_echo_1bit.png
+io/sar_img/1_vh_amp_echo_1bit.png
+io/sar_img/1_vv_amp_echo_1bit.png
 ```
 
 模型路径在 `configs/full_workflow.yaml` 中配置：
@@ -87,8 +87,8 @@ io/echo/1_vv_amp_echo_1bit.bin
 ```yaml
 pipeline:
   icore:
-    json: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_generated.json
-    raw: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_generated.raw
+    json: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_ZG.json
+    raw: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_ZG.raw
 ```
 
 运行前确认模型输入输出满足：
@@ -111,8 +111,8 @@ cd examples/2_Full_workflow
 程序内部流程：
 
 ```text
-1. 遍历 io/echo 下的 echo bin
-2. 使用 RD 算法生成复数 SAR 图，并对幅值做全图 min-max 得到 float32 0-1 SAR 图
+1. 遍历 io/sar_img 下的 SAR 图片
+2. 读取灰度 SAR 图片，并转换为 float32 0-1 SAR 图
 3. 以 512x512、stride=256 自动蛇形裁 float32 0-1 patch
 4. 构造 NHWC [1,512,512,1] FP32 输入 tensor
 5. 调用 icraft session.forward 推理
@@ -147,7 +147,7 @@ display:
   fps: 0
 ```
 
-建议先使用 `1280x720`，通常比 1080p 更稳。`fps: 0` 表示不主动限帧；如果需要限制显示速度，可以设置例如：
+建议先使用 `1920x1080`，官方设计的HDMI显示类就是用这个参数的。`fps: 0` 表示不主动限帧；如果需要限制显示速度，可以设置例如：
 
 ```yaml
 display:
@@ -266,7 +266,7 @@ pwd
 确认输入文件：
 
 ```bash
-ls io/echo
+ls io/sar_img
 ```
 
 ### 找不到模型 json/raw
@@ -299,8 +299,8 @@ output:
 
 ```yaml
 display:
-  width: 1280
-  height: 720
+  width: 1920
+  height: 1080
 ```
 
 ### 想先不接 HDMI 调试

@@ -1,5 +1,5 @@
 ﻿# full_workflow.yaml
-# 第 0 阶段完整链路配置：echo 回波 -> RD SAR 成像 -> patch 推理 -> 后处理 -> HDMI/PNG 输出
+# 第 0 阶段完整链路配置：SAR 图片 -> patch 推理 -> 后处理 -> HDMI/PNG 输出
 # 建议从 examples/2_Full_workflow 目录下运行程序，这样 ./io、./imodel 等相对路径才会正确。
 
 sys:
@@ -30,13 +30,14 @@ sys:
   profile: false
 
 input:
-  # echo 回波 bin 文件目录。程序会按文件名排序逐个处理。
-  echo_dir: ./io/echo
+  # SAR 成像结果图片目录。程序会按文件名排序逐个处理。
+  # 当前第 0 阶段直接读取这里的 SAR 图片，不再在板端执行 echo -> RD 成像，避免 1GB 内存下 OOM。
+  sar_img_dir: ./io/sar_img
 
-  # echo 文件扩展名。默认只读取 .bin。
-  echo_ext: .bin
+  # SAR 图片扩展名。默认读取 .png。
+  sar_img_ext: .png
 
-  # 是否递归遍历 echo_dir 的子目录。
+  # 是否递归遍历 sar_img_dir 的子目录。
   recursive: false
 
 pipeline:
@@ -52,11 +53,8 @@ pipeline:
     stride: 256
 
   icore:
-    # icraft generate 阶段生成的模型 json。
-    json: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_generated.json
-
-    # icraft generate 阶段生成的模型 raw。
-    raw: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_generated.raw
+    json: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_ZG.json
+    raw: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_ZG.raw
 
   # 每个输出 tensor 等待 ready 的最长时间，单位毫秒。
   # 这里是超时保护，不代表每次都会等待这么久。
@@ -75,9 +73,9 @@ display:
 output:
   # 输出模式：
   # hdmi = 直接送 HDMI 显示；png = 在板端保存 PNG 调试图，不走 HDMI。
-  mode: png
+  mode: hdmi
 
-  # png 模式下的输出目录。实际路径为：dir/<echo_stem>/patch_000000.png。
+  # png 模式下的输出目录。实际路径为：dir/<sar_image_stem>/patch_000000.png。
   dir: ./io/output
 
   # png 模式下如果目标文件已存在，是否覆盖。
