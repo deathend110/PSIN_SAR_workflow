@@ -64,3 +64,12 @@ target_link_libraries(full_workflow
     fmt pthread dl zlib ssl crypto atomic
     $<$<CXX_COMPILER_ID:GNU>:stdc++fs>
 )
+
+add_executable(rd_imaging_stream src/rd_imaging_stream.cpp)
+target_include_directories(rd_imaging_stream PRIVATE ${COMMON_INCLUDE_DIRS})
+target_link_libraries(rd_imaging_stream
+    PRIVATE
+    ${OPENCV_STATIC_LIBS}
+    pthread dl zlib ssl crypto atomic
+    $<$<CXX_COMPILER_ID:GNU>:stdc++fs>
+)
