@@ -22,7 +22,7 @@
 - `SHOW_OVERLAY`
 - `SHOW_COMPARE`
 
-HDMI 默认可以用你文档里说的“左侧图像 + 右侧状态栏”，分辨率优先按 `1280x720` 设计，这个判断也很实际。
+HDMI 默认可以用你文档里说的“左侧图像 + 右侧状态栏”，分辨率优先按 `1920 1080` 设计，这个判断也很实际。
 
 **第三阶段再做 Web 控制台**
 Web 控制台负责：
@@ -32,5 +32,3 @@ Web 控制台负责：
 - 开关 patch 框、性能统计、保存中间结果
 - 查看状态和日志
 - 推送实时 telemetry
-
-这个顺序比“一上来做完整控制台”稳很多。我的建议是：先把 `prompt.md` 作为设计方向保留，下一步可以把它拆成一个更具体的实现计划：`OverlayRenderer`、`RuntimeState`、`DisplayMode`、`Telemetry`、`ControlServer` 这几个模块。

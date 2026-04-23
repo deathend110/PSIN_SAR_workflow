@@ -3,6 +3,12 @@
 # 建议从 examples/2_Full_workflow 目录运行，这样相对路径会指向当前工程目录。
 
 rd:
+  # RD 执行模式：
+  # auto = 默认优先选择 memory_float32，超过内存上限才回退到 scratch_double。
+  # memory_float32 = 纯内存 float32 复数流程，磁盘 IO 最少，速度优先。
+  # scratch_double = 原 double 精度 scratch 流程，用于数值对照。
+  execution_mode: auto
+
   # 输入 echo 回波目录。程序会按文件名排序逐个处理。
   echo_dir: ./io/echo
 
@@ -17,15 +23,14 @@ rd:
   scratch_dir: ./io/rd_scratch
 
   # 距离向处理每次处理的方位列数。
-  # 512 是约 500MB 运行内存目标下的推荐值；如需更保守可改为 384。
-  column_tile: 512
+  # memory_float32 下推荐 64，内存更稳；板端稳定后可尝试 128。
+  column_tile: 64
 
   # 方位 FFT / 方位压缩每次处理的距离行数。
-  # 1024 是约 500MB 运行内存目标下的推荐值；如需更保守可改为 768。
-  row_tile: 1024
+  # memory_float32 下推荐 128，内存更稳；板端稳定后可尝试 256。
+  row_tile: 128
 
-  # 优先使用内存流水线以减少磁盘 IO。
-  # 当峰值内存估算不超过 memory_limit_mb 时，程序会把中间矩阵尽量留在内存里。
+  # 旧 double 内存流水线开关。通常保持 true 即可；auto 下优先使用 memory_float32。
   prefer_memory_pipeline: true
 
   # RD 允许使用的内存目标上限，单位 MB。

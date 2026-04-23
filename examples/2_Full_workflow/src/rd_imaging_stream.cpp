@@ -43,8 +43,9 @@ namespace
         std::string echo_ext = ".bin";
         fs::path output_dir = "./io/sar_img";
         fs::path scratch_dir = "./io/rd_scratch";
-        int column_tile = 512;
-        int row_tile = 1024;
+        std::string execution_mode = "auto";
+        int column_tile = 64;
+        int row_tile = 128;
         int memory_limit_mb = 500;
         bool prefer_memory_pipeline = true;
         bool keep_scratch = false;
@@ -193,6 +194,7 @@ namespace
         cfg.echo_ext = valueOr(values, "rd.echo_ext", cfg.echo_ext);
         cfg.output_dir = valueOr(values, "rd.output_dir", cfg.output_dir.string());
         cfg.scratch_dir = valueOr(values, "rd.scratch_dir", cfg.scratch_dir.string());
+        cfg.execution_mode = toLower(valueOr(values, "rd.execution_mode", cfg.execution_mode));
         cfg.column_tile = intValueOr(values, "rd.column_tile", cfg.column_tile);
         cfg.row_tile = intValueOr(values, "rd.row_tile", cfg.row_tile);
         cfg.memory_limit_mb = intValueOr(values, "rd.memory_limit_mb", cfg.memory_limit_mb);
@@ -212,6 +214,12 @@ namespace
         if (cfg.memory_limit_mb <= 0)
         {
             throw std::runtime_error("rd.memory_limit_mb must be positive.");
+        }
+        if (cfg.execution_mode != "auto" &&
+            cfg.execution_mode != "memory_float32" &&
+            cfg.execution_mode != "scratch_double")
+        {
+            throw std::runtime_error("rd.execution_mode must be auto, memory_float32, or scratch_double.");
         }
         return cfg;
     }
@@ -297,9 +305,25 @@ namespace
         return out;
     }
 
+    std::vector<cv::Vec2f> makeComplexExponentialF32(const std::vector<double> &freq, double coefficient)
+    {
+        std::vector<cv::Vec2f> out(freq.size());
+        for (size_t i = 0; i < freq.size(); ++i)
+        {
+            const double phase = coefficient * freq[i] * freq[i];
+            out[i] = cv::Vec2f(static_cast<float>(std::cos(phase)), static_cast<float>(std::sin(phase)));
+        }
+        return out;
+    }
+
     cv::Vec2d complexMultiply(const cv::Vec2d &a, const cv::Vec2d &b)
     {
         return cv::Vec2d(a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]);
+    }
+
+    cv::Vec2f complexMultiply(const cv::Vec2f &a, const cv::Vec2f &b)
+    {
+        return cv::Vec2f(a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]);
     }
 
     cv::Mat rollAxis(const cv::Mat &src, int axis, int shift)
@@ -351,9 +375,82 @@ namespace
         return rollAxis(src, axis, -(n / 2));
     }
 
+    cv::Mat rollAxisF32(const cv::Mat &src, int axis, int shift)
+    {
+        CV_Assert(src.type() == CV_32FC2);
+        const int n = (axis == 0) ? src.rows : src.cols;
+        if (n == 0)
+        {
+            return src.clone();
+        }
+        shift %= n;
+        if (shift < 0)
+        {
+            shift += n;
+        }
+
+        cv::Mat dst(src.size(), src.type());
+        if (axis == 0)
+        {
+            for (int r = 0; r < src.rows; ++r)
+            {
+                src.row((r - shift + src.rows) % src.rows).copyTo(dst.row(r));
+            }
+        }
+        else
+        {
+            for (int r = 0; r < src.rows; ++r)
+            {
+                const auto *src_row = src.ptr<cv::Vec2f>(r);
+                auto *dst_row = dst.ptr<cv::Vec2f>(r);
+                for (int c = 0; c < src.cols; ++c)
+                {
+                    dst_row[c] = src_row[(c - shift + src.cols) % src.cols];
+                }
+            }
+        }
+        return dst;
+    }
+
+    cv::Mat fftshiftF32(const cv::Mat &src, int axis)
+    {
+        const int n = (axis == 0) ? src.rows : src.cols;
+        return rollAxisF32(src, axis, n / 2);
+    }
+
+    cv::Mat ifftshiftF32(const cv::Mat &src, int axis)
+    {
+        const int n = (axis == 0) ? src.rows : src.cols;
+        return rollAxisF32(src, axis, -(n / 2));
+    }
+
     cv::Mat dftAxis(const cv::Mat &src, int axis, bool inverse)
     {
         CV_Assert(src.type() == CV_64FC2);
+        int flags = cv::DFT_COMPLEX_OUTPUT | cv::DFT_ROWS;
+        if (inverse)
+        {
+            flags |= cv::DFT_INVERSE | cv::DFT_SCALE;
+        }
+
+        cv::Mat dst;
+        if (axis == 1)
+        {
+            cv::dft(src, dst, flags);
+            return dst;
+        }
+
+        cv::Mat transposed;
+        cv::transpose(src, transposed);
+        cv::Mat transformed;
+        cv::dft(transposed, transformed, flags);
+        cv::transpose(transformed, dst);
+        return dst;
+    }
+
+    cv::Mat dftAxisF32(const cv::Mat &src, int axis, bool inverse)
+    {
+        CV_Assert(src.type() == CV_32FC2);
         int flags = cv::DFT_COMPLEX_OUTPUT | cv::DFT_ROWS;
         if (inverse)
         {
@@ -436,6 +533,52 @@ namespace
             }
         }
         return tile;
+    }
+
+    cv::Mat loadEchoF32(const fs::path &path, const EchoShape &shape)
+    {
+        std::ifstream ifs(path, std::ios::binary);
+        if (!ifs)
+        {
+            throw std::runtime_error("Failed to open echo bin: " + path.string());
+        }
+        checkedSeekg(ifs, 8);
+
+        cv::Mat data(shape.rows, shape.cols, CV_32FC2);
+        for (int r = 0; r < shape.rows; ++r)
+        {
+            if (!ifs.read(reinterpret_cast<char *>(data.ptr<cv::Vec2f>(r)),
+                          static_cast<std::streamsize>(shape.cols * sizeof(cv::Vec2f))))
+            {
+                throw std::runtime_error("Failed to read echo row into memory.");
+            }
+        }
+        return data;
+    }
+
+    cv::Mat gatherColumnTileF32(const cv::Mat &src, int col0, int tile_cols)
+    {
+        CV_Assert(src.type() == CV_32FC2);
+        cv::Mat tile(src.rows, tile_cols, CV_32FC2);
+        for (int r = 0; r < src.rows; ++r)
+        {
+            std::memcpy(tile.ptr<cv::Vec2f>(r),
+                        src.ptr<cv::Vec2f>(r) + col0,
+                        static_cast<size_t>(tile_cols) * sizeof(cv::Vec2f));
+        }
+        return tile;
+    }
+
+    void scatterColumnTileF32(const cv::Mat &tile, cv::Mat &dst, int col0)
+    {
+        CV_Assert(tile.type() == CV_32FC2);
+        CV_Assert(dst.type() == CV_32FC2);
+        for (int r = 0; r < dst.rows; ++r)
+        {
+            std::memcpy(dst.ptr<cv::Vec2f>(r) + col0,
+                        tile.ptr<cv::Vec2f>(r),
+                        static_cast<size_t>(tile.cols) * sizeof(cv::Vec2f));
+        }
     }
 
     cv::Mat readComplexRowTile(const fs::path &path, int cols, int row0, int tile_rows)
@@ -556,6 +699,34 @@ namespace
         }
     }
 
+    void multiplyRowsByFilterInPlaceF32(cv::Mat &tile, const std::vector<cv::Vec2f> &filter)
+    {
+        CV_Assert(tile.type() == CV_32FC2);
+        CV_Assert(static_cast<int>(filter.size()) >= tile.rows);
+        for (int r = 0; r < tile.rows; ++r)
+        {
+            auto *row = tile.ptr<cv::Vec2f>(r);
+            for (int c = 0; c < tile.cols; ++c)
+            {
+                row[c] = complexMultiply(row[c], filter[r]);
+            }
+        }
+    }
+
+    void multiplyColsByFilterInPlaceF32(cv::Mat &tile, const std::vector<cv::Vec2f> &filter)
+    {
+        CV_Assert(tile.type() == CV_32FC2);
+        CV_Assert(static_cast<int>(filter.size()) == tile.cols);
+        for (int r = 0; r < tile.rows; ++r)
+        {
+            auto *row = tile.ptr<cv::Vec2f>(r);
+            for (int c = 0; c < tile.cols; ++c)
+            {
+                row[c] = complexMultiply(row[c], filter[c]);
+            }
+        }
+    }
+
     std::vector<double> makeRcmcShifts(const std::vector<double> &f_a, const RadarConfig &cfg)
     {
         const double delta_r = cfg.c / (2.0 * cfg.Fs);
@@ -606,6 +777,36 @@ namespace
             }
         }
         return output;
+    }
+
+    void rcmcInPlaceF32(cv::Mat &data, const std::vector<double> &shifts)
+    {
+        CV_Assert(data.type() == CV_32FC2);
+        cv::Mat prev_row(1, data.cols, CV_32FC2);
+
+        for (int r = 0; r < data.rows; ++r)
+        {
+            data.row(r).copyTo(prev_row);
+            auto *dst_row = data.ptr<cv::Vec2f>(r);
+            const auto *saved_row = prev_row.ptr<cv::Vec2f>(0);
+
+            for (int c = 0; c < data.cols; ++c)
+            {
+                const double map_r = static_cast<double>(r) + shifts[c];
+                if (map_r < 0.0 || map_r >= static_cast<double>(data.rows - 1))
+                {
+                    dst_row[c] = cv::Vec2f(0.0f, 0.0f);
+                    continue;
+                }
+
+                const int idx0 = static_cast<int>(std::floor(map_r));
+                const float w = static_cast<float>(map_r - static_cast<double>(idx0));
+                const cv::Vec2f v0 = (idx0 == r) ? saved_row[c] : data.at<cv::Vec2f>(idx0, c);
+                const cv::Vec2f v1 = data.at<cv::Vec2f>(idx0 + 1, c);
+                dst_row[c] = cv::Vec2f((1.0f - w) * v0[0] + w * v1[0],
+                                       (1.0f - w) * v0[1] + w * v1[1]);
+            }
+        }
     }
 
     std::vector<fs::path> collectEchoBins(const AppConfig &cfg)
@@ -899,6 +1100,49 @@ namespace
         }
     }
 
+    void writeNormalizedPngFromComplexF32(const cv::Mat &complex_img, const fs::path &output_path)
+    {
+        CV_Assert(complex_img.type() == CV_32FC2);
+        logLine("[stage] normalize + write PNG -> " + output_path.string());
+        cv::Mat out_img(complex_img.rows, complex_img.cols, CV_8UC1, cv::Scalar(0));
+
+        float min_val = std::numeric_limits<float>::infinity();
+        float max_val = -std::numeric_limits<float>::infinity();
+        for (int r = 0; r < complex_img.rows; ++r)
+        {
+            const auto *src_row = complex_img.ptr<cv::Vec2f>(r);
+            for (int c = 0; c < complex_img.cols; ++c)
+            {
+                const float value = std::hypot(src_row[c][0], src_row[c][1]);
+                min_val = std::min(min_val, value);
+                max_val = std::max(max_val, value);
+            }
+        }
+
+        if (std::isfinite(min_val) && std::isfinite(max_val) && max_val != min_val)
+        {
+            const float scale = 255.0f / (max_val - min_val);
+            for (int r = 0; r < complex_img.rows; ++r)
+            {
+                const auto *src_row = complex_img.ptr<cv::Vec2f>(r);
+                auto *dst_row = out_img.ptr<std::uint8_t>(r);
+                for (int c = 0; c < complex_img.cols; ++c)
+                {
+                    const float value = std::hypot(src_row[c][0], src_row[c][1]);
+                    const float normalized = (value - min_val) * scale;
+                    const float clamped = std::max(0.0f, std::min(255.0f, normalized));
+                    dst_row[c] = static_cast<std::uint8_t>(clamped);
+                }
+            }
+        }
+
+        fs::create_directories(output_path.parent_path());
+        if (!cv::imwrite(output_path.string(), out_img))
+        {
+            throw std::runtime_error("Failed to write output PNG: " + output_path.string());
+        }
+    }
+
     void writeNormalizedPng(const fs::path &magnitude_path,
                             const fs::path &output_path,
                             const EchoShape &shape,
@@ -937,6 +1181,64 @@ namespace
         }
     }
 
+    void runMemoryFloat32Pipeline(const fs::path &echo_path,
+                                  const fs::path &output_path,
+                                  const EchoShape &shape,
+                                  const std::vector<double> &f_r,
+                                  const std::vector<double> &f_a,
+                                  const RadarConfig &radar,
+                                  int column_tile,
+                                  int row_tile)
+    {
+        logLine("[stage] load echo -> CV_32FC2 memory");
+        cv::Mat data = loadEchoF32(echo_path, shape);
+
+        const auto Hr = makeComplexExponentialF32(f_r, -CV_PI / radar.gamma());
+        const double Ka = 2.0 * radar.v_platform * radar.v_platform / (radar.lam() * radar.R0);
+        const auto Ha = makeComplexExponentialF32(f_a, -CV_PI / Ka);
+
+        logLine("[stage] range compression -> memory_float32");
+        for (int col0 = 0; col0 < shape.cols; col0 += column_tile)
+        {
+            const int tile_cols = std::min(column_tile, shape.cols - col0);
+            cv::Mat tile = gatherColumnTileF32(data, col0, tile_cols);
+            tile = fftshiftF32(tile, 0);
+            tile = dftAxisF32(tile, 0, false);
+            tile = fftshiftF32(tile, 0);
+            multiplyRowsByFilterInPlaceF32(tile, Hr);
+            tile = dftAxisF32(tile, 0, true);
+            scatterColumnTileF32(tile, data, col0);
+        }
+
+        logLine("[stage] azimuth FFT -> memory_float32");
+        for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
+        {
+            const int tile_rows = std::min(row_tile, shape.rows - row0);
+            cv::Mat tile = data.rowRange(row0, row0 + tile_rows).clone();
+            tile = fftshiftF32(tile, 1);
+            tile = dftAxisF32(tile, 1, false);
+            tile = fftshiftF32(tile, 1);
+            tile.copyTo(data.rowRange(row0, row0 + tile_rows));
+        }
+
+        logLine("[stage] RCMC -> memory_float32 in-place");
+        const auto shifts = makeRcmcShifts(f_a, radar);
+        rcmcInPlaceF32(data, shifts);
+
+        logLine("[stage] azimuth compression + IFFT -> memory_float32");
+        for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
+        {
+            const int tile_rows = std::min(row_tile, shape.rows - row0);
+            cv::Mat tile = data.rowRange(row0, row0 + tile_rows).clone();
+            multiplyColsByFilterInPlaceF32(tile, Ha);
+            tile = ifftshiftF32(tile, 1);
+            tile = dftAxisF32(tile, 1, true);
+            tile.copyTo(data.rowRange(row0, row0 + tile_rows));
+        }
+
+        writeNormalizedPngFromComplexF32(data, output_path);
+    }
+
     void processOneEcho(const fs::path &echo_path, const AppConfig &cfg)
     {
         const auto start = std::chrono::steady_clock::now();
@@ -960,13 +1262,33 @@ namespace
         const std::uint64_t complex_bytes = static_cast<std::uint64_t>(shape.rows) *
                                             static_cast<std::uint64_t>(shape.cols) *
                                             sizeof(cv::Vec2d);
+        const std::uint64_t complex_f32_bytes = static_cast<std::uint64_t>(shape.rows) *
+                                                static_cast<std::uint64_t>(shape.cols) *
+                                                sizeof(cv::Vec2f);
         const std::uint64_t estimated_memory_peak = complex_bytes * 4ull;
+        const std::uint64_t f32_memory_peak = complex_f32_bytes +
+                                              std::max<std::uint64_t>(
+                                                  static_cast<std::uint64_t>(shape.rows) *
+                                                      static_cast<std::uint64_t>(cfg.column_tile) *
+                                                      sizeof(cv::Vec2f) * 4ull,
+                                                  static_cast<std::uint64_t>(cfg.row_tile) *
+                                                      static_cast<std::uint64_t>(shape.cols) *
+                                                      sizeof(cv::Vec2f) * 4ull) +
+                                              static_cast<std::uint64_t>(shape.rows) *
+                                                  static_cast<std::uint64_t>(shape.cols);
+        const bool use_memory_float32 =
+            cfg.execution_mode == "memory_float32" ||
+            (cfg.execution_mode == "auto" &&
+             f32_memory_peak <= static_cast<std::uint64_t>(cfg.memory_limit_mb) * 1024ull * 1024ull);
         const bool use_memory_pipeline =
+            cfg.execution_mode != "scratch_double" &&
             cfg.prefer_memory_pipeline &&
             estimated_memory_peak <= static_cast<std::uint64_t>(cfg.memory_limit_mb) * 1024ull * 1024ull;
-        logLine(std::string("RD pipeline mode: ") + (use_memory_pipeline ? "memory" : "scratch") +
+        logLine(std::string("RD pipeline mode: ") +
+                (use_memory_float32 ? "memory_float32" : (use_memory_pipeline ? "memory_double" : "scratch_double")) +
                 ", one complex image=" + std::to_string(complex_bytes / 1024ull / 1024ull) +
-                " MiB, memory pipeline estimate=" + std::to_string(estimated_memory_peak / 1024ull / 1024ull) + " MiB");
+                " MiB, f32 estimate=" + std::to_string(f32_memory_peak / 1024ull / 1024ull) +
+                " MiB, double estimate=" + std::to_string(estimated_memory_peak / 1024ull / 1024ull) + " MiB");
 
         try
         {
@@ -977,7 +1299,11 @@ namespace
             const double Ka = 2.0 * radar.v_platform * radar.v_platform / (radar.lam() * radar.R0);
             const auto Ha = makeComplexExponential(f_a, -CV_PI / Ka);
 
-            if (use_memory_pipeline)
+            if (use_memory_float32)
+            {
+                runMemoryFloat32Pipeline(echo_path, output_path, shape, f_r, f_a, radar, cfg.column_tile, cfg.row_tile);
+            }
+            else if (use_memory_pipeline)
             {
                 cv::Mat data_rc = runRangeCompressionToMemory(echo_path, shape, Hr, cfg.column_tile);
                 cv::Mat sar_complex = runMemoryPipeline(std::move(data_rc), shape, f_a, Ha, radar);
