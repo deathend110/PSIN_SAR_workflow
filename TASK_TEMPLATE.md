@@ -181,3 +181,11 @@ ctest --test-dir build --output-on-failure
 - 测试通过
 - 修改范围符合约束
 - diff 可 review
+
+
+## 14. md update
+
+需要你随着代码更新而更新的文件：
+
+- ARCHITECTURE_TEMPLATE.md
+- CODEBASE_MAP_TEMPLATE.md
