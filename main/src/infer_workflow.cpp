@@ -1101,11 +1101,12 @@ namespace workflow::infer
                      const MiniMapContext &context,
                      const PatchInfo &patch,
                      const cv::Scalar &patch_color,
+                     const cv::Scalar &current_point_color,
                      const cv::Scalar &border_color)
     {
-        cv::rectangle(canvas, body_rect, cv::Scalar(231, 236, 242), cv::FILLED);
+        cv::rectangle(canvas, body_rect, cv::Scalar(242, 236, 231), cv::FILLED);
         cv::rectangle(canvas, body_rect, border_color, 1, cv::LINE_AA);
-        drawGridTexture(canvas, body_rect, std::max(14, body_rect.width / 12), cv::Scalar(248, 250, 252));
+        drawGridTexture(canvas, body_rect, std::max(14, body_rect.width / 12), cv::Scalar(255, 255, 255));
 
         const cv::Rect image_rect = drawFittedImage(context.sar_preview_bgr, canvas, insetRect(body_rect, 8, 8), cv::INTER_LINEAR);
 
@@ -1121,8 +1122,8 @@ namespace workflow::infer
                                                                     static_cast<float>(patch.y + patch.height / 2)),
                                                         context,
                                                         image_rect);
-        cv::circle(canvas, current_center, std::max(3, body_rect.width / 70), patch_color, cv::FILLED, cv::LINE_AA);
-        cv::circle(canvas, current_center, std::max(5, body_rect.width / 50), cv::Scalar(190, 24, 24), 1, cv::LINE_AA);
+        cv::circle(canvas, current_center, std::max(3, body_rect.width / 70), current_point_color, cv::FILLED, cv::LINE_AA);
+        cv::circle(canvas, current_center, std::max(5, body_rect.width / 50), current_point_color, 1, cv::LINE_AA);
 
     }
 
@@ -1136,8 +1137,8 @@ namespace workflow::infer
             "Building",
             "Mountain"};
 
-        cv::rectangle(canvas, panel_rect, cv::Scalar(238, 242, 246), cv::FILLED);
-        cv::rectangle(canvas, panel_rect, cv::Scalar(151, 163, 175), 1, cv::LINE_AA);
+        cv::rectangle(canvas, panel_rect, cv::Scalar(246, 242, 238), cv::FILLED);
+        cv::rectangle(canvas, panel_rect, cv::Scalar(176, 163, 151), 1, cv::LINE_AA);
 
         const int font_face = cv::FONT_HERSHEY_SIMPLEX;
         const double title_scale = std::max(0.34, panel_rect.height / 140.0);
@@ -1150,7 +1151,7 @@ namespace workflow::infer
                     cv::Point(panel_rect.x + pad, panel_rect.y + pad + panel_rect.height / 10),
                     font_face,
                     title_scale,
-                    cv::Scalar(15, 23, 42),
+                    cv::Scalar(42, 23, 15),
                     title_thickness,
                     cv::LINE_AA);
 
@@ -1176,7 +1177,7 @@ namespace workflow::infer
                         cv::Point(color_rect.br().x + 6, y + color_rect.height - 1),
                         font_face,
                         row_scale,
-                        cv::Scalar(31, 41, 55),
+                        cv::Scalar(55, 41, 31),
                         row_thickness,
                         cv::LINE_AA);
         }
@@ -1189,15 +1190,26 @@ namespace workflow::infer
                                      int width,
                                      int height)
     {
-        const cv::Scalar shell_bg(42, 47, 53);
-        const cv::Scalar frame_bg(115, 122, 132);
-        const cv::Scalar panel_bg(238, 242, 246);
-        const cv::Scalar header_bg(214, 219, 226);
-        const cv::Scalar border_color(154, 163, 175);
-        const cv::Scalar title_color(15, 23, 42);
-        const cv::Scalar subtitle_color(71, 85, 105);
-        const cv::Scalar success_color(34, 197, 94);
-        const cv::Scalar patch_color(239, 68, 68);
+        const cv::Scalar shell_bg(53, 47, 42);
+        const cv::Scalar frame_bg(132, 122, 115);
+        const cv::Scalar panel_bg(246, 242, 238);
+        const cv::Scalar header_bg(226, 219, 214);
+        const cv::Scalar border_color(184, 172, 162);
+        const cv::Scalar title_color(42, 23, 15);
+        const cv::Scalar subtitle_color(105, 85, 71);
+        const cv::Scalar success_color(94, 197, 34);
+        const cv::Scalar badge_bg(251, 248, 246);
+        const cv::Scalar badge_text_color(85, 65, 51);
+        const cv::Scalar running_text_color(52, 101, 22);
+        const cv::Scalar patch_color(172, 239, 134);
+        const cv::Scalar current_point_color(68, 68, 239);
+        const cv::Scalar outer_border_color(175, 163, 154);
+        const cv::Scalar inner_frame_border_color(114, 103, 95);
+        const cv::Scalar outer_grid_color(148, 138, 130);
+        const cv::Scalar divider_color(217, 208, 200);
+        const cv::Scalar restore_body_bg(245, 241, 237);
+        const cv::Scalar seg_body_bg(234, 227, 221);
+        const cv::Scalar seg_grid_color(255, 255, 255);
 
         cv::Mat canvas(height, width, CV_8UC3, shell_bg);
         const int margin = std::max(10, std::min(width, height) / 48);
@@ -1207,8 +1219,9 @@ namespace workflow::infer
         const cv::Rect shell_rect(margin, margin, width - margin * 2, height - margin * 2);
 
         cv::rectangle(canvas, shell_rect, frame_bg, cv::FILLED);
-        cv::rectangle(canvas, shell_rect, cv::Scalar(95, 103, 114), std::max(2, margin / 4), cv::LINE_AA);
-        drawGridTexture(canvas, insetRect(shell_rect, 2, 2), std::max(18, width / 72), cv::Scalar(130, 138, 148));
+        cv::rectangle(canvas, shell_rect, outer_border_color, 1, cv::LINE_AA);
+        cv::rectangle(canvas, shell_rect, inner_frame_border_color, std::max(2, margin / 4), cv::LINE_AA);
+        drawGridTexture(canvas, insetRect(shell_rect, 2, 2), std::max(18, width / 72), outer_grid_color);
 
         const cv::Rect header_rect(shell_rect.x, shell_rect.y, shell_rect.width, std::min(header_height, shell_rect.height));
         cv::rectangle(canvas, header_rect, header_bg, cv::FILLED);
@@ -1233,7 +1246,7 @@ namespace workflow::infer
 
         auto drawBadge = [&](int x, const std::string &label, const cv::Scalar &text_color, bool with_dot) {
             const cv::Rect badge_rect(x, header_rect.y + (header_rect.height - badge_height) / 2, badge_width, badge_height);
-            cv::rectangle(canvas, badge_rect, cv::Scalar(246, 248, 251), cv::FILLED);
+            cv::rectangle(canvas, badge_rect, badge_bg, cv::FILLED);
             cv::rectangle(canvas, badge_rect, border_color, 1, cv::LINE_AA);
             int text_x = badge_rect.x + 10;
             if (with_dot)
@@ -1257,11 +1270,11 @@ namespace workflow::infer
         };
 
         int badge_x = header_rect.br().x - header_pad - badge_width;
-        drawBadge(badge_x, ui_context.output_label, cv::Scalar(51, 65, 85), false);
+        drawBadge(badge_x, ui_context.output_label, badge_text_color, false);
         badge_x -= badge_gap + badge_width;
-        drawBadge(badge_x, "MODE / " + ui_context.mode_label, cv::Scalar(51, 65, 85), false);
+        drawBadge(badge_x, "MODE / " + ui_context.mode_label, badge_text_color, false);
         badge_x -= badge_gap + badge_width;
-        drawBadge(badge_x, ui_context.status_label, cv::Scalar(22, 101, 52), true);
+        drawBadge(badge_x, ui_context.status_label, running_text_color, true);
 
         const int content_top = header_rect.br().y + gap;
         const int content_bottom = shell_rect.br().y - footer_height - gap;
@@ -1290,7 +1303,7 @@ namespace workflow::infer
                                             border_color,
                                             title_color,
                                             subtitle_color);
-        drawMiniMap(canvas, map_body, ui_context.mini_map, state.patch, patch_color, border_color);
+        drawMiniMap(canvas, map_body, ui_context.mini_map, state.patch, patch_color, current_point_color, border_color);
 
         const cv::Rect telemetry_body = drawPanel(canvas,
                                                   telemetry_panel,
@@ -1321,7 +1334,7 @@ namespace workflow::infer
                        metrics,
                        subtitle_color,
                        title_color,
-                       cv::Scalar(200, 208, 217));
+                       divider_color);
 
         const int status_height = std::max(92, main_column.height / 6);
         const cv::Rect status_panel(main_column.x, main_column.y, main_column.width, status_height);
@@ -1403,32 +1416,32 @@ namespace workflow::infer
                                                 border_color,
                                                 title_color,
                                                 subtitle_color);
-        cv::rectangle(canvas, restore_body, cv::Scalar(237, 241, 245), cv::FILLED);
+        cv::rectangle(canvas, restore_body, restore_body_bg, cv::FILLED);
         drawGridTexture(canvas, restore_body, std::max(18, restore_body.width / 18), cv::Scalar(255, 255, 255));
         drawFittedImage(restore_bgr, canvas, insetRect(restore_body, 10, 10), cv::INTER_NEAREST);
         const cv::Rect restore_badge(restore_body.x + 12, restore_body.y + 12, std::max(180, restore_body.width / 2), std::max(28, restore_body.height / 16));
-        cv::rectangle(canvas, restore_badge, cv::Scalar(238, 242, 246), cv::FILLED);
+        cv::rectangle(canvas, restore_badge, panel_bg, cv::FILLED);
         cv::rectangle(canvas, restore_badge, border_color, 1, cv::LINE_AA);
         cv::putText(canvas,
                     truncateToWidth("PATCH / " + state.sar_stem, restore_badge.width - 12, font_face, 0.42, 1),
                     cv::Point(restore_badge.x + 6, restore_badge.y + restore_badge.height / 2 + restore_badge.height / 8),
                     font_face,
                     0.42,
-                    cv::Scalar(51, 65, 85),
+                    badge_text_color,
                     1,
                     cv::LINE_AA);
         const cv::Rect restore_footer(restore_body.br().x - std::max(120, restore_body.width / 4) - 12,
                                       restore_body.br().y - std::max(28, restore_body.height / 16) - 12,
                                       std::max(120, restore_body.width / 4),
                                       std::max(28, restore_body.height / 16));
-        cv::rectangle(canvas, restore_footer, cv::Scalar(238, 242, 246), cv::FILLED);
+        cv::rectangle(canvas, restore_footer, panel_bg, cv::FILLED);
         cv::rectangle(canvas, restore_footer, border_color, 1, cv::LINE_AA);
         cv::putText(canvas,
                     ui_context.restore_label,
                     cv::Point(restore_footer.x + 8, restore_footer.y + restore_footer.height / 2 + restore_footer.height / 8),
                     font_face,
                     0.42,
-                    cv::Scalar(51, 65, 85),
+                    badge_text_color,
                     1,
                     cv::LINE_AA);
 
@@ -1442,18 +1455,18 @@ namespace workflow::infer
                                             border_color,
                                             title_color,
                                             subtitle_color);
-        cv::rectangle(canvas, seg_body, cv::Scalar(221, 227, 234), cv::FILLED);
-        drawGridTexture(canvas, seg_body, std::max(18, seg_body.width / 18), cv::Scalar(245, 247, 250));
+        cv::rectangle(canvas, seg_body, seg_body_bg, cv::FILLED);
+        drawGridTexture(canvas, seg_body, std::max(18, seg_body.width / 18), seg_grid_color);
         drawFittedImage(mask_bgr, canvas, insetRect(seg_body, 10, 10), cv::INTER_NEAREST);
         const cv::Rect seg_badge(seg_body.x + 12, seg_body.y + 12, std::max(180, seg_body.width / 3), std::max(28, seg_body.height / 16));
-        cv::rectangle(canvas, seg_badge, cv::Scalar(238, 242, 246), cv::FILLED);
+        cv::rectangle(canvas, seg_badge, panel_bg, cv::FILLED);
         cv::rectangle(canvas, seg_badge, border_color, 1, cv::LINE_AA);
         cv::putText(canvas,
                     ui_context.seg_label,
                     cv::Point(seg_badge.x + 6, seg_badge.y + seg_badge.height / 2 + seg_badge.height / 8),
                     font_face,
                     0.42,
-                    cv::Scalar(51, 65, 85),
+                    badge_text_color,
                     1,
                     cv::LINE_AA);
 
@@ -1482,7 +1495,7 @@ namespace workflow::infer
                     cv::Point(footer_rect.x + header_pad, footer_rect.y + footer_rect.height / 2 + footer_rect.height / 8),
                     font_face,
                     footer_scale,
-                    cv::Scalar(51, 65, 85),
+                    badge_text_color,
                     1,
                     cv::LINE_AA);
         const int footer_width = cv::getTextSize(right_footer, font_face, footer_scale, 1, nullptr).width;
