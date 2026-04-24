@@ -1,0 +1,11 @@
+server:
+  bind: 0.0.0.0
+  port: 8080
+  sse_heartbeat_ms: 1000
+
+ui:
+  title: PSIN SAR Web Console
+
+config:
+  infer_path: configs/infer_workflow.yaml
+  rd_path: configs/rd_imaging.yaml

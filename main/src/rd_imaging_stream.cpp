@@ -26,6 +26,14 @@ namespace workflow::rd
 
     namespace
     {
+        struct StopRequested : public std::exception
+        {
+            const char *what() const noexcept override
+            {
+                return "stop requested";
+            }
+        };
+
         struct RadarConfig
         {
             double c = 3e8;
@@ -46,6 +54,54 @@ namespace workflow::rd
             int rows = 0;
             int cols = 0;
         };
+
+    shared::WorkflowSelection makeSelection(const AppConfig &cfg)
+    {
+        shared::WorkflowSelection selection;
+        selection.workflow = shared::SelectedWorkflow::RdOnly;
+        selection.patch_mode = shared::SelectedPatchMode::AutoSnake;
+        selection.output_mode = "png";
+        selection.selected_source = cfg.echo_dir.string();
+        return selection;
+    }
+
+    void publishSnapshot(shared::WorkflowRunControl *control,
+                         const AppConfig &cfg,
+                         shared::ControlState state,
+                         const std::string &stage,
+                         const std::string &current_item,
+                         int current_index,
+                         int total_count,
+                         const std::string &last_error = {})
+    {
+        if (control == nullptr)
+        {
+            return;
+        }
+
+        shared::WorkflowRuntimeSnapshot snapshot;
+        snapshot.state = state;
+        snapshot.selection = makeSelection(cfg);
+        snapshot.current_stage = stage;
+        snapshot.current_item = current_item;
+        snapshot.last_error = last_error;
+        snapshot.current_index = current_index;
+        snapshot.total_count = total_count;
+        control->publish(snapshot);
+    }
+
+    void checkControl(shared::WorkflowRunControl *control)
+    {
+        if (control == nullptr)
+        {
+            return;
+        }
+        control->waitIfPaused();
+        if (control->shouldStop())
+        {
+            throw StopRequested{};
+        }
+    }
 
     void logLine(const std::string &message)
     {
@@ -634,7 +690,19 @@ namespace workflow::rd
 
     std::vector<fs::path> collectEchoBins(const AppConfig &cfg)
     {
-        if (!fs::exists(cfg.echo_dir) || !fs::is_directory(cfg.echo_dir))
+        if (!fs::exists(cfg.echo_dir))
+        {
+            throw std::runtime_error("Echo path does not exist: " + cfg.echo_dir.string());
+        }
+        if (fs::is_regular_file(cfg.echo_dir))
+        {
+            if (shared::ToLower(cfg.echo_dir.extension().string()) != cfg.echo_ext)
+            {
+                throw std::runtime_error("Selected echo file does not match configured extension: " + cfg.echo_dir.string());
+            }
+            return {cfg.echo_dir};
+        }
+        if (!fs::is_directory(cfg.echo_dir))
         {
             throw std::runtime_error("Echo directory does not exist: " + cfg.echo_dir.string());
         }
@@ -659,12 +727,14 @@ namespace workflow::rd
                              const fs::path &stage_a,
                              const EchoShape &shape,
                              const std::vector<cv::Vec2d> &Hr,
-                             int column_tile)
+                             int column_tile,
+                             shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] range compression -> " + stage_a.string());
         auto out = openScratchForRandomWrite(stage_a);
         for (int col0 = 0; col0 < shape.cols; col0 += column_tile)
         {
+            checkControl(control);
             const int tile_cols = std::min(column_tile, shape.cols - col0);
             cv::Mat tile = readEchoColumnTile(echo_path, shape.rows, shape.cols, col0, tile_cols);
             tile = fftshift(tile, 0);
@@ -679,12 +749,14 @@ namespace workflow::rd
     cv::Mat runRangeCompressionToMemory(const fs::path &echo_path,
                                         const EchoShape &shape,
                                         const std::vector<cv::Vec2d> &Hr,
-                                        int column_tile)
+                                        int column_tile,
+                                        shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] range compression -> memory");
         cv::Mat data_rc(shape.rows, shape.cols, CV_64FC2);
         for (int col0 = 0; col0 < shape.cols; col0 += column_tile)
         {
+            checkControl(control);
             const int tile_cols = std::min(column_tile, shape.cols - col0);
             cv::Mat tile = readEchoColumnTile(echo_path, shape.rows, shape.cols, col0, tile_cols);
             tile = fftshift(tile, 0);
@@ -706,12 +778,14 @@ namespace workflow::rd
     void runAzimuthFft(const fs::path &stage_a,
                        const fs::path &stage_b,
                        const EchoShape &shape,
-                       int row_tile)
+                       int row_tile,
+                       shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] azimuth FFT -> " + stage_b.string());
         auto out = openScratchForRandomWrite(stage_b);
         for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
         {
+            checkControl(control);
             const int tile_rows = std::min(row_tile, shape.rows - row0);
             cv::Mat tile = readComplexRowTile(stage_a, shape.cols, row0, tile_rows);
             tile = fftshift(tile, 1);
@@ -726,7 +800,8 @@ namespace workflow::rd
                  const EchoShape &shape,
                  const std::vector<double> &f_a,
                  const RadarConfig &radar,
-                 int row_tile)
+                 int row_tile,
+                 shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] RCMC -> " + stage_a.string());
         auto out = openScratchForRandomWrite(stage_a);
@@ -737,6 +812,7 @@ namespace workflow::rd
 
         for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
         {
+            checkControl(control);
             const int tile_rows = std::min(row_tile, shape.rows - row0);
             const int input_row0 = row0;
             const int input_row1 = std::min(shape.rows - 1,
@@ -752,7 +828,8 @@ namespace workflow::rd
                                                                 const fs::path &magnitude_path,
                                                                 const EchoShape &shape,
                                                                 const std::vector<cv::Vec2d> &Ha,
-                                                                int row_tile)
+                                                                int row_tile,
+                                                                shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] azimuth compression + IFFT -> magnitude scratch");
         auto out = openScratchForRandomWrite(magnitude_path);
@@ -761,6 +838,7 @@ namespace workflow::rd
 
         for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
         {
+            checkControl(control);
             const int tile_rows = std::min(row_tile, shape.rows - row0);
             cv::Mat tile = readComplexRowTile(stage_a, shape.cols, row0, tile_rows);
             multiplyColsByFilterInPlace(tile, Ha);
@@ -792,7 +870,8 @@ namespace workflow::rd
                                                                          const std::vector<double> &f_a,
                                                                          const std::vector<cv::Vec2d> &Ha,
                                                                          const RadarConfig &radar,
-                                                                         int row_tile)
+                                                                         int row_tile,
+                                                                         shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] fused RCMC + azimuth compression + IFFT -> magnitude scratch");
         auto out = openScratchForRandomWrite(magnitude_path);
@@ -806,6 +885,7 @@ namespace workflow::rd
 
         for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
         {
+            checkControl(control);
             const int tile_rows = std::min(row_tile, shape.rows - row0);
             const int input_row0 = row0;
             const int input_row1 = std::min(shape.rows - 1,
@@ -843,7 +923,8 @@ namespace workflow::rd
                               const EchoShape &shape,
                               const std::vector<double> &f_a,
                               const std::vector<cv::Vec2d> &Ha,
-                              const RadarConfig &radar)
+                              const RadarConfig &radar,
+                              shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] azimuth FFT -> memory");
         cv::Mat data_fa = fftshift(data_rc, 1);
@@ -856,6 +937,7 @@ namespace workflow::rd
         cv::Mat data_rcmc = cv::Mat::zeros(shape.rows, shape.cols, CV_64FC2);
         for (int r = 0; r < shape.rows; ++r)
         {
+            checkControl(control);
             auto *dst_row = data_rcmc.ptr<cv::Vec2d>(r);
             for (int c = 0; c < shape.cols; ++c)
             {
@@ -971,7 +1053,8 @@ namespace workflow::rd
                             const EchoShape &shape,
                             double min_val,
                             double max_val,
-                            int row_tile)
+                            int row_tile,
+                            shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] normalize + write PNG -> " + output_path.string());
         cv::Mat out_img(shape.rows, shape.cols, CV_8UC1, cv::Scalar(0));
@@ -981,6 +1064,7 @@ namespace workflow::rd
             const double scale = 255.0 / (max_val - min_val);
             for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
             {
+                checkControl(control);
                 const int tile_rows = std::min(row_tile, shape.rows - row0);
                 cv::Mat mag = readMagnitudeRowTile(magnitude_path, shape.cols, row0, tile_rows);
                 for (int r = 0; r < tile_rows; ++r)
@@ -1011,7 +1095,8 @@ namespace workflow::rd
                                   const std::vector<double> &f_a,
                                   const RadarConfig &radar,
                                   int column_tile,
-                                  int row_tile)
+                                  int row_tile,
+                                  shared::WorkflowRunControl *control = nullptr)
     {
         logLine("[stage] load echo -> CV_32FC2 memory");
         cv::Mat data = loadEchoF32(echo_path, shape);
@@ -1023,6 +1108,7 @@ namespace workflow::rd
         logLine("[stage] range compression -> memory_float32");
         for (int col0 = 0; col0 < shape.cols; col0 += column_tile)
         {
+            checkControl(control);
             const int tile_cols = std::min(column_tile, shape.cols - col0);
             cv::Mat tile = gatherColumnTileF32(data, col0, tile_cols);
             tile = fftshiftF32(tile, 0);
@@ -1036,6 +1122,7 @@ namespace workflow::rd
         logLine("[stage] azimuth FFT -> memory_float32");
         for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
         {
+            checkControl(control);
             const int tile_rows = std::min(row_tile, shape.rows - row0);
             cv::Mat tile = data.rowRange(row0, row0 + tile_rows).clone();
             tile = fftshiftF32(tile, 1);
@@ -1051,6 +1138,7 @@ namespace workflow::rd
         logLine("[stage] azimuth compression + IFFT -> memory_float32");
         for (int row0 = 0; row0 < shape.rows; row0 += row_tile)
         {
+            checkControl(control);
             const int tile_rows = std::min(row_tile, shape.rows - row0);
             cv::Mat tile = data.rowRange(row0, row0 + tile_rows).clone();
             multiplyColsByFilterInPlaceF32(tile, Ha);
@@ -1062,10 +1150,15 @@ namespace workflow::rd
         writeNormalizedPngFromComplexF32(data, output_path);
     }
 
-    void processOneEcho(const fs::path &echo_path, const AppConfig &cfg)
+    void processOneEcho(const fs::path &echo_path,
+                        const AppConfig &cfg,
+                        shared::WorkflowRunControl *control = nullptr,
+                        int current_index = 0,
+                        int total_count = 0)
     {
         const auto start = std::chrono::steady_clock::now();
         logLine("Processing echo: " + echo_path.string());
+        publishSnapshot(control, cfg, shared::ControlState::Running, "process echo", echo_path.string(), current_index, total_count);
 
         const EchoShape shape = readEchoShapeAndValidate(echo_path);
         logLine("Echo shape: " + std::to_string(shape.rows) + "x" + std::to_string(shape.cols));
@@ -1074,6 +1167,7 @@ namespace workflow::rd
         if (fs::exists(output_path) && !cfg.overwrite)
         {
             logLine("Skip existing output: " + output_path.string());
+            publishSnapshot(control, cfg, shared::ControlState::Running, "skip existing output", output_path.string(), current_index, total_count);
             return;
         }
 
@@ -1124,18 +1218,22 @@ namespace workflow::rd
 
             if (use_memory_float32)
             {
-                runMemoryFloat32Pipeline(echo_path, output_path, shape, f_r, f_a, radar, cfg.column_tile, cfg.row_tile);
+                publishSnapshot(control, cfg, shared::ControlState::Running, "memory_float32 pipeline", echo_path.string(), current_index, total_count);
+                runMemoryFloat32Pipeline(echo_path, output_path, shape, f_r, f_a, radar, cfg.column_tile, cfg.row_tile, control);
             }
             else if (use_memory_pipeline)
             {
-                cv::Mat data_rc = runRangeCompressionToMemory(echo_path, shape, Hr, cfg.column_tile);
-                cv::Mat sar_complex = runMemoryPipeline(std::move(data_rc), shape, f_a, Ha, radar);
+                publishSnapshot(control, cfg, shared::ControlState::Running, "memory pipeline", echo_path.string(), current_index, total_count);
+                cv::Mat data_rc = runRangeCompressionToMemory(echo_path, shape, Hr, cfg.column_tile, control);
+                cv::Mat sar_complex = runMemoryPipeline(std::move(data_rc), shape, f_a, Ha, radar, control);
                 writeNormalizedPngFromComplex(sar_complex, output_path);
             }
             else
             {
-                runRangeCompression(echo_path, stage_a, shape, Hr, cfg.column_tile);
-                runAzimuthFft(stage_a, stage_b, shape, cfg.row_tile);
+                publishSnapshot(control, cfg, shared::ControlState::Running, "scratch range compression", echo_path.string(), current_index, total_count);
+                runRangeCompression(echo_path, stage_a, shape, Hr, cfg.column_tile, control);
+                publishSnapshot(control, cfg, shared::ControlState::Running, "scratch azimuth fft", echo_path.string(), current_index, total_count);
+                runAzimuthFft(stage_a, stage_b, shape, cfg.row_tile, control);
 
                 if (!cfg.keep_scratch)
                 {
@@ -1150,14 +1248,15 @@ namespace workflow::rd
                                                                f_a,
                                                                Ha,
                                                                radar,
-                                                               cfg.row_tile);
+                                                               cfg.row_tile,
+                                                               control);
                 logLine("Magnitude min=" + std::to_string(min_val) + ", max=" + std::to_string(max_val));
                 if (!cfg.keep_scratch)
                 {
                     std::error_code ec;
                     fs::remove(stage_b, ec);
                 }
-                writeNormalizedPng(magnitude_path, output_path, shape, min_val, max_val, cfg.row_tile);
+                writeNormalizedPng(magnitude_path, output_path, shape, min_val, max_val, cfg.row_tile, control);
             }
 
             if (!cfg.keep_scratch)
@@ -1183,16 +1282,22 @@ namespace workflow::rd
         const auto end = std::chrono::steady_clock::now();
         const double seconds = std::chrono::duration<double>(end - start).count();
         logLine("Saved: " + output_path.string() + ", elapsed=" + std::to_string(seconds) + "s");
+        publishSnapshot(control, cfg, shared::ControlState::Running, "echo complete", output_path.string(), current_index, total_count);
     }
     }
 
 int Run(const std::filesystem::path &config_path)
 {
+    return Run(LoadConfig(config_path), nullptr);
+}
+
+int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
+{
     try
     {
-        const AppConfig cfg = LoadConfig(config_path);
         fs::create_directories(cfg.output_dir);
         fs::create_directories(cfg.scratch_dir);
+        publishSnapshot(control, cfg, shared::ControlState::Starting, "load config", cfg.echo_dir.string(), 0, 0);
 
         logLine("Config loaded: echo_dir=" + cfg.echo_dir.string() +
                 ", output_dir=" + cfg.output_dir.string() +
@@ -1204,32 +1309,69 @@ int Run(const std::filesystem::path &config_path)
             throw std::runtime_error("No echo bin files found in: " + cfg.echo_dir.string());
         }
         logLine("Found " + std::to_string(files.size()) + " echo bin file(s).");
+        publishSnapshot(control, cfg, shared::ControlState::Running, "collect echo bins", cfg.echo_dir.string(), 0, static_cast<int>(files.size()));
 
         int failed = 0;
+        bool stop_requested = false;
         for (size_t i = 0; i < files.size(); ++i)
         {
+            checkControl(control);
             logLine("========== [" + std::to_string(i + 1) + "/" + std::to_string(files.size()) + "] ==========");
             try
             {
-                processOneEcho(files[i], cfg);
+                processOneEcho(files[i], cfg, control, static_cast<int>(i + 1), static_cast<int>(files.size()));
+            }
+            catch (const StopRequested &)
+            {
+                stop_requested = true;
+                logLine("Stop requested. Finishing RD workflow at safe point.");
+                break;
             }
             catch (const std::exception &e)
             {
                 ++failed;
                 logLine(std::string("Error: ") + e.what());
+                publishSnapshot(control,
+                                cfg,
+                                shared::ControlState::Running,
+                                "echo error",
+                                files[i].string(),
+                                static_cast<int>(i + 1),
+                                static_cast<int>(files.size()),
+                                e.what());
             }
         }
 
+        if (stop_requested)
+        {
+            publishSnapshot(control, cfg, shared::ControlState::Idle, "stopped", cfg.echo_dir.string(), 0, static_cast<int>(files.size()));
+            return 0;
+        }
         if (failed > 0)
         {
             logLine("Finished with " + std::to_string(failed) + " failed file(s).");
+            publishSnapshot(control,
+                            cfg,
+                            shared::ControlState::Error,
+                            "finished with errors",
+                            cfg.echo_dir.string(),
+                            failed,
+                            static_cast<int>(files.size()),
+                            std::to_string(failed) + " file(s) failed");
             return 2;
         }
         logLine("All echo files processed successfully.");
+        publishSnapshot(control, cfg, shared::ControlState::Finished, "finished", cfg.echo_dir.string(), static_cast<int>(files.size()), static_cast<int>(files.size()));
+        return 0;
+    }
+    catch (const StopRequested &)
+    {
+        publishSnapshot(control, cfg, shared::ControlState::Idle, "stopped", cfg.echo_dir.string(), 0, 0);
         return 0;
     }
     catch (const std::exception &e)
     {
+        publishSnapshot(control, cfg, shared::ControlState::Error, "error", cfg.echo_dir.string(), 0, 0, e.what());
         std::cerr << "rd_imaging_stream failed: " << e.what() << std::endl;
         return 1;
     }

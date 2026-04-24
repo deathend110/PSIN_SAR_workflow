@@ -18,8 +18,10 @@
 - 启动后只允许选择一个模式运行：
   - `RD only`
   - `Inference only`
+  - `Web Console`
   - `Exit`
-- v1 不支持在同一次进程里自动串联 `RD + Inference`
+- CLI 仍保留 `RD only / Inference only`
+- `Web Console` 作为新的第三模式，以单进程 HTTP + JSON + SSE 方式暴露板端控制台
 
 这样设计的原因：
 
@@ -33,12 +35,10 @@
 当前工程明确不负责：
 
 - 模型训练、量化、导出
-- 上位机 GUI / Web 控制端
-- 网络通信和远程控制协议
-- 多任务并发调度
-- 通用跨平台显示框架
 - 改写第三方依赖 `deps/`
 - 在 v1 中实现单进程自动串联 RD 与推理
+- 真正的 `manual_flight` 飞行控制逻辑
+- YAML 写回磁盘
 
 ---
 
@@ -48,10 +48,15 @@
 |---|---|---|
 | Main entry | `main/src/main.cpp` | 显示菜单并调度模式 |
 | Shared config utils | `main/include/workflow/shared/*`, `main/src/config_utils.cpp` | 简单 YAML 读取、字符串清理、默认值解析、运行模式枚举 |
+| Shared run control | `main/include/workflow/shared/run_control.hpp` | 协作式 `pause / resume / stop / reset` 请求与运行时快照发布 |
 | RD config | `main/include/workflow/rd/rd_config.hpp`, `main/src/rd_config.cpp` | 解析 `configs/rd_imaging.yaml` |
 | RD workflow | `main/include/workflow/rd/rd_workflow.hpp`, `main/src/rd_imaging_stream.cpp` | 收集 echo、校验、成像、写 SAR、管理 scratch |
 | Infer config | `main/include/workflow/infer/infer_config.hpp`, `main/src/infer_config.cpp` | 解析 `configs/infer_workflow.yaml` |
 | Infer workflow | `main/include/workflow/infer/infer_workflow.hpp`, `main/src/infer_workflow.cpp` | 收集 SAR、切 patch、构建 tensor、跑 session、后处理、合成工业风 UI 帧、输出 |
+| Web console config | `main/include/workflow/web/web_console_config.hpp`, `main/src/web_console_config.cpp`, `main/configs/web_console.yaml` | 解析 Web 服务自身配置 |
+| Web controller | `main/include/workflow/web/web_console_controller.hpp`, `main/src/web_console_controller.cpp` | 管理 UI 选择、内存配置、状态机、后台工作线程 |
+| Web protocol | `main/include/workflow/web/web_console_protocol.hpp`, `main/src/web_console_protocol.cpp` | 固定 JSON DTO、简单 JSON/Query 解析、SSE payload |
+| Web server | `main/include/workflow/web/web_console_server.hpp`, `main/src/web_console_server.cpp`, `main/src/web_console_assets.cpp` | HTTP 路由、静态资源、SSE 推送 |
 | HDMI adapter | `main/include/infer_workflow_hdmi_display.hpp` | RGB565 UDMA buffer 与 HDMI 显示适配 |
 
 模块边界原则：
@@ -60,6 +65,8 @@
 - RD 与推理分别暴露单一顶层接口：
   - `workflow::rd::Run(const std::filesystem::path&)`
   - `workflow::infer::Run(const std::filesystem::path&)`
+  - `workflow::web::Run(const std::filesystem::path&)`
+- RD / Infer 同时保留 `Run(const AppConfig&, WorkflowRunControl*)` 重载，供 Web 控制层以内存配置启动后台任务
 - 不为了“好看”把内部算法细碎拆成过多文件
 
 ---
@@ -73,6 +80,7 @@ main()
  -> PromptForMode()
  -> RD only        -> workflow::rd::Run("configs/rd_imaging.yaml")
  -> Inference only -> workflow::infer::Run("configs/infer_workflow.yaml")
+ -> Web Console    -> workflow::web::Run("configs/web_console.yaml")
  -> Exit
 ```
 
@@ -103,6 +111,21 @@ io/sar_img/*.png
  -> build mini-map / telemetry context
  -> compose final industrial UI frame
  -> HDMI or io/output/<stem>/patch_*.png
+```
+
+### 4.4 Web Console
+
+```text
+browser
+ -> GET /, /app.js, /app.css
+ -> GET /api/state, /api/settings, /api/sources
+ -> POST /api/selection, /api/command/*, /api/settings
+ -> GET /events (SSE primary path)
+ -> WebConsoleServer thread
+ -> WebConsoleController
+ -> background worker thread
+    -> workflow::rd::Run(AppConfig, WorkflowRunControl*)
+    -> workflow::infer::Run(AppConfig, WorkflowRunControl*)
 ```
 
 ---
@@ -140,31 +163,36 @@ io/sar_img/*.png
 
 ## 6. Thread Model
 
-Phase 1 note:
-- HDMI UI stays single-threaded.
-- Each patch still follows `forward -> waitForReady -> host copy -> device.reset(1)`.
-- The final UI frame is composed after inference and then shared by both HDMI and PNG sinks.
+Fix1 tightened the Web Console side into four explicit runtime roles:
 
-当前仍然是单主线程串行模型：
+- Main thread:
+  starts and stops Web mode, owns `WebConsoleController` and `WebConsoleServer`
+- Web control thread:
+  the only network I/O carrier; handles HTTP, SSE, state reads, and command writes
+- Workflow worker thread:
+  the only background algorithm thread; runs `workflow::rd::Run(...)` or `workflow::infer::Run(...)`
+- HDMI render thread:
+  only exists for `Inference + output.mode=hdmi`; it is not merged into the Web layer
+
+Web-specific invariants after Fix1:
+
+- Ordinary HTTP requests are handled synchronously inside the dedicated server thread; no per-request detached worker is used.
+- `WebConsoleController` no longer performs network callbacks while holding `mutex_`.
+- Real-time state is pushed primarily through `/events`; `GET /api/state` is retained for first-load bootstrap and reconnect fallback only.
+
+当前线程模型分成三层：
 
 - `workflow::rd::Run(...)`
-  - 主线程负责读取配置、遍历 echo、执行成像、落盘、清理 scratch
+  - 仍是单工作线程串行执行
+  - 通过 `WorkflowRunControl` 在文件级 / tile 级安全点协作式响应 `pause / stop`
 - `workflow::infer::Run(...)`
-  - 主线程负责设备打开、session 初始化、遍历 SAR、推理、UI 合成、输出
+  - 保留 Phase 2 的“推理线程 + HDMI/UI 线程”结构
+  - `pause / stop` 只在 patch 边界生效
+- `workflow::web::Run(...)`
+  - 主线程负责 HTTP accept / 路由
+  - `WebConsoleController` 持有一个后台工作线程来运行阻塞式 RD/Infer 入口
 
-当前没有项目级：
-
-- `mutex`
-- `condition_variable`
-- `task queue`
-- 显式 patch worker 线程
-- RD / infer 并行流水线
-
-结论：
-
-- 当前最重要的时序风险不是 C++ 级多线程，而是设备/session 的使用顺序和资源生命周期
-- 第一阶段 HDMI UI 已批准继续保持单线程：`单 patch 推理完成后，再把结果嵌入 UI 并输出`
-- 第一阶段不引入 UI 线程、patch worker 线程或 queue 化显示流水
+当前没有项目级多任务调度器，也没有多作业并发执行；Web 模式下同一时刻只允许一个活跃工作流。
 
 ---
 
@@ -178,6 +206,9 @@ Phase 1 note:
 | `Session` | `workflow::infer::Run(...)` | 覆盖所有 patch 推理 |
 | `IFrameSink` | `workflow::infer::Run(...)` | 覆盖所有 SAR 图输出 |
 | `RGB565HDMIDisplay` | `HdmiFrameSink` | 与 HDMI sink 同生命周期 |
+| `WorkflowRunControl` | `WebConsoleController` | 覆盖单次 Web 启动的后台作业 |
+| `WebConsoleController` | `workflow::web::Run(...)` | 覆盖整个 Web Console 生命周期 |
+| `WebConsoleServer` | `workflow::web::Run(...)` | 由主线程持有、由独立 Web 线程承载，覆盖整个 HTTP / SSE 服务生命周期 |
 | 输入 tensor | `PatchTensorBuilder::build()` 返回值 | 单 patch 生命周期 |
 | 输出 tensor host copy | `PatchInferenceRunner::forward()` 返回值 | 单 patch 生命周期 |
 | scratch files | `workflow::rd::Run(...)` 每个 echo 处理过程 | 正常或异常路径清理，除非 `keep_scratch=true` |
@@ -212,6 +243,12 @@ RD 模块：
   - 设备打开失败
   - 输出超时
 
+Web 控制台：
+
+- API 层返回固定 JSON `ok/code/message`
+- `manual_flight` 和 WASD 当前统一返回 `not_implemented`
+- 后台线程异常通过 controller 收口成 `Error` 状态和 SSE `error` 事件
+
 ---
 
 ## 9. Performance Constraints
@@ -244,6 +281,8 @@ RD 模块：
 - 不改 patch 策略
 - 不改输出语义
 
+Web 模式下性能目标也不是高并发 HTTP，而是板端单用户、单作业、低成本控制和状态观测。
+
 ---
 
 ## 10. Invariants / Do-not-break Rules
@@ -257,6 +296,7 @@ Phase 1 UI invariants:
 
 - 主程序一次只运行一个模式
 - 不在 v1 中自动串联 RD 与推理
+- Web Console 只允许一个活跃后台工作流
 - `RD only` 的输入输出路径保持：
   - `io/echo/*.bin`
   - `io/sar_img/*.png`

@@ -149,6 +149,50 @@ namespace workflow::infer
             cv::Mat restore_bgr;
             cv::Mat mask_bgr;
         };
+
+        shared::SelectedPatchMode parsePatchMode(const std::string &mode)
+        {
+            return shared::ToLower(mode) == "manual_flight"
+                       ? shared::SelectedPatchMode::ManualFlight
+                       : shared::SelectedPatchMode::AutoSnake;
+        }
+
+        shared::WorkflowSelection makeSelection(const AppConfig &cfg)
+        {
+            shared::WorkflowSelection selection;
+            selection.workflow = shared::SelectedWorkflow::InferOnly;
+            selection.patch_mode = parsePatchMode(cfg.patch_mode);
+            selection.output_mode = cfg.output_mode;
+            selection.selected_source = cfg.sar_img_dir.string();
+            return selection;
+        }
+
+        void publishSnapshot(shared::WorkflowRunControl *control,
+                             const AppConfig &cfg,
+                             const RuntimeState &state,
+                             const std::string &stage,
+                             shared::ControlState control_state,
+                             const std::string &current_item = {},
+                             const std::string &last_error = {})
+        {
+            if (control == nullptr)
+            {
+                return;
+            }
+
+            shared::WorkflowRuntimeSnapshot snapshot;
+            snapshot.state = control_state;
+            snapshot.selection = makeSelection(cfg);
+            snapshot.current_stage = stage;
+            snapshot.current_item = current_item.empty() ? state.sar_stem : current_item;
+            snapshot.last_error = last_error;
+            snapshot.current_index = state.patch.index >= 0 ? (state.patch.index + 1) : state.sar_index;
+            snapshot.total_count = state.patch_count > 0 ? state.patch_count : state.sar_count;
+            snapshot.infer_ms = state.infer_ms;
+            snapshot.total_ms = state.total_ms;
+            snapshot.fps = state.fps;
+            control->publish(snapshot);
+        }
     }
 
     namespace
@@ -477,7 +521,22 @@ namespace workflow::infer
 
     std::vector<fs::path> collectSarImages(const AppConfig &cfg)
     {
-        if (!fs::exists(cfg.sar_img_dir) || !fs::is_directory(cfg.sar_img_dir))
+        if (!fs::exists(cfg.sar_img_dir))
+        {
+            throw std::runtime_error("Input SAR image path does not exist: " + cfg.sar_img_dir.string());
+        }
+
+        if (fs::is_regular_file(cfg.sar_img_dir))
+        {
+            const auto wanted_ext = shared::ToLower(cfg.sar_img_ext);
+            if (shared::ToLower(cfg.sar_img_dir.extension().string()) != wanted_ext)
+            {
+                throw std::runtime_error("Selected SAR image does not match configured extension: " + cfg.sar_img_dir.string());
+            }
+            return {cfg.sar_img_dir};
+        }
+
+        if (!fs::is_directory(cfg.sar_img_dir))
         {
             throw std::runtime_error("Input SAR image directory does not exist: " + cfg.sar_img_dir.string());
         }
@@ -1839,14 +1898,14 @@ namespace workflow::infer
         spdlog::info("ZG330 backend log requested. Check .icraft/logs for generate_memopt.log.");
     }
 
-    void processPatchToPng(const PatchPacket &packet,
-                           const RuntimeState &base_state,
-                           const UiRenderContext &ui_context,
-                           PatchTensorBuilder &tensor_builder,
-                           PatchInferenceRunner &runner,
-                           IFrameSink &sink,
-                           const AppConfig &cfg,
-                           int &frame_counter)
+    RuntimeState processPatchToPng(const PatchPacket &packet,
+                                   const RuntimeState &base_state,
+                                   const UiRenderContext &ui_context,
+                                   PatchTensorBuilder &tensor_builder,
+                                   PatchInferenceRunner &runner,
+                                   IFrameSink &sink,
+                                   const AppConfig &cfg,
+                                   int &frame_counter)
     {
         RuntimeState state = base_state;
         state.patch = packet.info;
@@ -1886,17 +1945,18 @@ namespace workflow::infer
                      state.infer_ms,
                      state.total_ms,
                      state.fps);
+        return state;
     }
 
-    void processPatchToHdmi(const PatchPacket &packet,
-                            const RuntimeState &base_state,
-                            const UiRenderContext &ui_context,
-                            PatchTensorBuilder &tensor_builder,
-                            PatchInferenceRunner &runner,
-                            std::mutex &device_access_mutex,
-                            LatestSnapshotMailbox &mailbox,
-                            HdmiRenderWorker &render_worker,
-                            int &frame_counter)
+    RuntimeState processPatchToHdmi(const PatchPacket &packet,
+                                    const RuntimeState &base_state,
+                                    const UiRenderContext &ui_context,
+                                    PatchTensorBuilder &tensor_builder,
+                                    PatchInferenceRunner &runner,
+                                    std::mutex &device_access_mutex,
+                                    LatestSnapshotMailbox &mailbox,
+                                    HdmiRenderWorker &render_worker,
+                                    int &frame_counter)
     {
         render_worker.rethrowIfFailed();
 
@@ -1954,10 +2014,16 @@ namespace workflow::infer
                      state.infer_ms,
                      state.total_ms,
                      state.fps);
+        return state;
     }
     }
 
 int Run(const std::filesystem::path &config_path)
+{
+    return Run(LoadConfig(config_path), nullptr);
+}
+
+int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
 {
     Device device;
     bool device_open = false;
@@ -1969,13 +2035,15 @@ int Run(const std::filesystem::path &config_path)
         spdlog::set_level(spdlog::level::info);
 
         setStage("load config");
-        const AppConfig cfg = LoadConfig(config_path);
+        RuntimeState published_state;
+        publishSnapshot(control, cfg, published_state, "load config", shared::ControlState::Starting, cfg.sar_img_dir.string());
         spdlog::info("Config loaded: output.mode={}, sar_img_dir={}, model_json={}",
                      cfg.output_mode,
                      cfg.sar_img_dir.string(),
                      cfg.json_path);
 
         setStage("collect SAR images");
+        publishSnapshot(control, cfg, published_state, "collect SAR images", shared::ControlState::Starting, cfg.sar_img_dir.string());
         const auto sar_files = collectSarImages(cfg);
         if (sar_files.empty())
         {
@@ -1988,6 +2056,7 @@ int Run(const std::filesystem::path &config_path)
         device_open = true;
 
         setStage("load network json/raw");
+        publishSnapshot(control, cfg, published_state, "load network", shared::ControlState::Starting, cfg.json_path);
         auto network = loadNetwork(cfg.json_path, cfg.raw_path);
 
         setStage("create network view");
@@ -2041,6 +2110,12 @@ int Run(const std::filesystem::path &config_path)
                                     device,
                                     cfg.output_wait_ms);
         int frame_counter = 0;
+        bool stop_requested = false;
+
+        if (parsePatchMode(cfg.patch_mode) == shared::SelectedPatchMode::ManualFlight)
+        {
+            throw std::runtime_error("manual_flight is reserved for a future phase.");
+        }
 
         for (size_t sar_idx = 0; sar_idx < sar_files.size(); ++sar_idx)
         {
@@ -2076,33 +2151,52 @@ int Run(const std::filesystem::path &config_path)
             UiRenderContext ui_context;
             ui_context.output_label = buildOutputLabel(cfg);
             ui_context.mini_map = buildMiniMapContext(sar_norm, cfg.patch_size, cfg.stride, patch_source.rows(), patch_source.cols());
+            publishSnapshot(control, cfg, base_state, "sar loaded", shared::ControlState::Running, sar_path.string());
 
             PatchPacket packet;
             while (patch_source.next(packet))
             {
+                if (control != nullptr)
+                {
+                    control->waitIfPaused();
+                    if (control->shouldStop())
+                    {
+                        publishSnapshot(control, cfg, base_state, "stop requested", shared::ControlState::Stopping, sar_path.string());
+                        stop_requested = true;
+                        break;
+                    }
+                }
+
+                RuntimeState patch_state;
                 if (cfg.output_mode == "hdmi")
                 {
-                    processPatchToHdmi(packet,
-                                       base_state,
-                                       ui_context,
-                                       tensor_builder,
-                                       runner,
-                                       device_access_mutex,
-                                       *hdmi_mailbox,
-                                       *hdmi_render_worker,
-                                       frame_counter);
+                    patch_state = processPatchToHdmi(packet,
+                                                     base_state,
+                                                     ui_context,
+                                                     tensor_builder,
+                                                     runner,
+                                                     device_access_mutex,
+                                                     *hdmi_mailbox,
+                                                     *hdmi_render_worker,
+                                                     frame_counter);
                 }
                 else
                 {
-                    processPatchToPng(packet,
-                                      base_state,
-                                      ui_context,
-                                      tensor_builder,
-                                      runner,
-                                      *sink,
-                                      cfg,
-                                      frame_counter);
+                    patch_state = processPatchToPng(packet,
+                                                    base_state,
+                                                    ui_context,
+                                                    tensor_builder,
+                                                    runner,
+                                                    *sink,
+                                                    cfg,
+                                                    frame_counter);
                 }
+                publishSnapshot(control, cfg, patch_state, "patch processed", shared::ControlState::Running, sar_path.string());
+            }
+
+            if (stop_requested)
+            {
+                break;
             }
         }
 
@@ -2120,10 +2214,23 @@ int Run(const std::filesystem::path &config_path)
             Device::Close(device);
             device_open = false;
         }
+        publishSnapshot(control,
+                        cfg,
+                        RuntimeState{},
+                        stop_requested ? "stopped" : "finished",
+                        stop_requested ? shared::ControlState::Idle : shared::ControlState::Finished,
+                        cfg.sar_img_dir.string());
         return 0;
     }
     catch (const std::exception &e)
     {
+        publishSnapshot(control,
+                        cfg,
+                        RuntimeState{},
+                        "error",
+                        shared::ControlState::Error,
+                        cfg.sar_img_dir.string(),
+                        e.what());
         spdlog::error("infer_workflow failed: {}", e.what());
         try
         {

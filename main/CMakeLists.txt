@@ -61,6 +61,12 @@ add_executable(psin_workflow
     src/rd_imaging_stream.cpp
     src/infer_config.cpp
     src/infer_workflow.cpp
+    src/web_console.cpp
+    src/web_console_config.cpp
+    src/web_console_protocol.cpp
+    src/web_console_controller.cpp
+    src/web_console_server.cpp
+    src/web_console_assets.cpp
 )
 target_include_directories(psin_workflow PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(psin_workflow

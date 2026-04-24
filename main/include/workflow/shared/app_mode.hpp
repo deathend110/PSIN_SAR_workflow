@@ -6,6 +6,7 @@ namespace workflow
     {
         RdOnly = 1,
         InferOnly = 2,
+        WebConsole = 3,
         Exit = 0,
     };
 }
