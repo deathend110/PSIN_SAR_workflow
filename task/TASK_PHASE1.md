@@ -11,6 +11,22 @@
 - NPU 推理耗时
 - 总延时
 - 分割类别图例
+- 左上角小地图区域显示当前的输入SAR图片的完整略缩图,并用红色框出当前patch在地图上的位置,虚线绘制无人机的飞行路线
+- UI生成和模型推理模块应该是两个线程.或者模型推理完成后把参数和结果图嵌入UI对应位置,并输出为HDMI或者保存为png
+- 参考UI设计里面的分割图的legend可能有点大,你适当缩小,不要占据过大的篇幅,主要还是要展示恢复和分割结果图片.具体的图例颜色以后处理时的字典映射为真正颜色:
+```cpp
+cv::Vec3b classColorBgr(int cls)
+{
+    static const cv::Vec3b colors[SEG_CLASSES] = {
+        cv::Vec3b(255, 0, 0),
+        cv::Vec3b(0, 255, 0),
+        cv::Vec3b(0, 0, 255),
+        cv::Vec3b(255, 255, 0),
+        cv::Vec3b(0, 255, 255),
+        cv::Vec3b(255, 0, 255)};
+    return colors[std::max(0, std::min(cls, SEG_CLASSES - 1))];
+}
+```
 
 ---
 
@@ -18,9 +34,10 @@
 
 这个任务为什么存在？
 
-- 当前问题：我们已经完成了第0阶段，打通全链路的流程。现在要进行第一阶段，整合HDMI显示
-- 相关上下文：
-- 触发场景：
+- 当前问题：我们已经完成了第0阶段，打通全链路的流程。并完成了工作区代码模块化。现在要进行第一阶段，整合HDMI显示。
+- 相关上下文：关于HDMI输出UI的设计，参考：main\src\hdmi_ui_preview_1080_p_industrial.jsx
+            这是我设计的一版，你要做的就是整合这个UI.
+- 触发场景：HDMI输出和png保存，都需要用到这个UI
 - 已知限制：
 
 ---
@@ -60,17 +77,17 @@
 
 ---
 
-## 5. Files/modules to avoid
+## 6. Functional requirements
 
-写清楚不许动的范围。
+列成可验收条目：
 
-```text
-src/runtime/**
-src/display/**
-cmake/**
-third_party/**
-```
+具体你自己分析
 
+---
+
+## 7. Non-functional requirements
+
+具体你自己分析
 
 ---
 
@@ -86,14 +103,14 @@ main\src\hdmi_ui_preview_1080_p_industrial.jsx
 ## 9. Edge cases
 
 要求 Codex 必须考虑这些：
-
+具体你自己分析
 
 ---
 
 ## 10. Validation
 
 运行编译语法验证：
-
+具体你自己分析
 ---
 
 ## 11. Required response format before editing
@@ -125,17 +142,5 @@ main\src\hdmi_ui_preview_1080_p_industrial.jsx
 ## 13. Done when
 
 写成客观验收标准：
+具体你自己分析
 
-- patch 顺序与预期一致
-- 边缘不足不返回
-- 测试通过
-- 修改范围符合约束
-- diff 可 review
-
-
-## 14. md update
-
-需要你随着代码更新而更新的MD文件：
-
-- ARCHITECTURE_TEMPLATE.md
-- CODEBASE_MAP_TEMPLATE.md

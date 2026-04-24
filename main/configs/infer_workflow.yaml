@@ -1,6 +1,6 @@
-﻿# full_workflow.yaml
-# 第 0 阶段完整链路配置：SAR 图片 -> patch 推理 -> 后处理 -> HDMI/PNG 输出
-# 建议从 examples/2_Full_workflow 目录下运行程序，这样 ./io、./imodel 等相对路径才会正确。
+# infer_workflow.yaml
+# 第 0 阶段推理链路配置：SAR 图片 -> patch 推理 -> 后处理 -> HDMI/PNG 输出
+# 建议从 main/ 目录下运行 psin_workflow，这样 ./io、./imodel 等相对路径才会正确。
 
 sys:
   # ZG330 设备 URL。

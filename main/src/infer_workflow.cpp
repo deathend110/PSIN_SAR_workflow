@@ -1,4 +1,7 @@
-#include "full_workflow_hdmi_display.hpp"
+#include "infer_workflow_hdmi_display.hpp"
+#include "workflow/infer/infer_config.hpp"
+#include "workflow/infer/infer_workflow.hpp"
+#include "workflow/shared/config_utils.hpp"
 #include <icraft-backends/hostbackend/backend.h>
 #include <icraft-backends/hostbackend/utils.h>
 #include <icraft-backends/zg330backend/zg330backend.h>
@@ -15,7 +18,6 @@
 #include <algorithm>
 #include <chrono>
 #include <csignal>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -31,7 +33,6 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -39,313 +40,102 @@ using namespace icraft::xrt;
 using namespace icraft::xir;
 using FPAIDevice = icraft::xrt::ZG330Device;
 
-namespace fs = std::filesystem;
-
-namespace
+namespace workflow::infer
 {
-    constexpr int EXPECTED_N = 1;
-    constexpr int EXPECTED_H = 512;
-    constexpr int EXPECTED_W = 512;
-    constexpr int EXPECTED_C = 1;
-    constexpr int SEG_CLASSES = 6;
+    namespace fs = std::filesystem;
 
-    const char *g_runtime_stage = "startup";
-
-    void setStage(const char *stage)
+    namespace
     {
-        g_runtime_stage = stage;
-        spdlog::info("[stage] {}", stage);
-    }
+        constexpr int EXPECTED_N = kExpectedN;
+        constexpr int EXPECTED_H = kExpectedH;
+        constexpr int EXPECTED_W = kExpectedW;
+        constexpr int EXPECTED_C = kExpectedC;
+        constexpr int SEG_CLASSES = kSegClasses;
 
-    void handleSegfault(int)
-    {
-        std::fprintf(stderr, "\n[fatal] Segmentation fault near stage: %s\n", g_runtime_stage);
-        std::_Exit(139);
-    }
+        const char *g_runtime_stage = "startup";
 
-    struct RadarConfig
-    {
-        double c = 3e8;
-        double fc = 36.01e9;
-        double B = 30e6;
-        double Tp = 1e-6;
-        double Fs = 4.0 * 30e6;
-        double PRF = 480.0;
-        double v_platform = 10.0;
-        double R0 = 400.0;
-
-        double lam() const { return c / fc; }
-        double gamma() const { return B / Tp; }
-    };
-
-    struct ComplexImage
-    {
-        cv::Mat data;
-        int rows = 0;
-        int cols = 0;
-    };
-
-    struct AppConfig
-    {
-        std::string device_url;
-        std::string run_backend = "zg330";
-        bool mmu_mode = true;
-        bool speed_mode = false;
-        bool compress_ftmp = false;
-        int ocm_option = 1;
-        bool enable_profile = false;
-
-        fs::path sar_img_dir = "./io/sar_img";
-        std::string sar_img_ext = ".png";
-        bool recursive = false;
-
-        std::string patch_mode = "auto_snake";
-        int patch_size = 512;
-        int stride = 256;
-
-        std::string json_path;
-        std::string raw_path;
-        int output_wait_ms = 20000;
-
-        int display_width = 1280;
-        int display_height = 720;
-        int display_fps = 0;
-
-        std::string output_mode = "hdmi";
-        fs::path output_dir = "./io/output";
-        bool overwrite = true;
-
-        bool dump_backend_log = true;
-    };
-
-    struct PatchInfo
-    {
-        int index = -1;
-        int grid_row = -1;
-        int grid_col = -1;
-        int x = -1;
-        int y = -1;
-        int width = 0;
-        int height = 0;
-        bool right_to_left = false;
-    };
-
-    struct PatchPacket
-    {
-        PatchInfo info;
-        cv::Mat patch_norm;
-    };
-
-    struct RuntimeState
-    {
-        std::string echo_stem;
-        int echo_index = 0;
-        int echo_count = 0;
-        PatchInfo patch;
-        double rd_ms = 0.0;
-        double infer_ms = 0.0;
-        double total_ms = 0.0;
-    };
-
-    std::string trim(std::string value)
-    {
-        const auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-        value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
-        value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
-        return value;
-    }
-
-    std::string stripQuotes(std::string value)
-    {
-        value = trim(std::move(value));
-        if (value.size() >= 2 &&
-            ((value.front() == '"' && value.back() == '"') ||
-             (value.front() == '\'' && value.back() == '\'')))
+        void setStage(const char *stage)
         {
-            return value.substr(1, value.size() - 2);
+            g_runtime_stage = stage;
+            spdlog::info("[stage] {}", stage);
         }
-        return value;
-    }
 
-    std::string toLower(std::string value)
-    {
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        return value;
-    }
-
-    bool parseBool(const std::string &value)
-    {
-        const auto lowered = toLower(trim(value));
-        if (lowered == "true" || lowered == "1" || lowered == "yes" || lowered == "on")
+        void handleSegfault(int)
         {
-            return true;
+            std::fprintf(stderr, "\n[fatal] Segmentation fault near stage: %s\n", g_runtime_stage);
+            std::_Exit(139);
         }
-        if (lowered == "false" || lowered == "0" || lowered == "no" || lowered == "off")
+
+        struct RadarConfig
         {
-            return false;
-        }
-        throw std::runtime_error("Failed to parse bool config value: " + value);
+            double c = 3e8;
+            double fc = 36.01e9;
+            double B = 30e6;
+            double Tp = 1e-6;
+            double Fs = 4.0 * 30e6;
+            double PRF = 480.0;
+            double v_platform = 10.0;
+            double R0 = 400.0;
+
+            double lam() const { return c / fc; }
+            double gamma() const { return B / Tp; }
+        };
+
+        struct ComplexImage
+        {
+            cv::Mat data;
+            int rows = 0;
+            int cols = 0;
+        };
+
+        struct PatchInfo
+        {
+            int index = -1;
+            int grid_row = -1;
+            int grid_col = -1;
+            int x = -1;
+            int y = -1;
+            int width = 0;
+            int height = 0;
+            bool right_to_left = false;
+        };
+
+        struct PatchPacket
+        {
+            PatchInfo info;
+            cv::Mat patch_norm;
+        };
+
+        struct RuntimeState
+        {
+            std::string echo_stem;
+            int echo_index = 0;
+            int echo_count = 0;
+            PatchInfo patch;
+            double rd_ms = 0.0;
+            double infer_ms = 0.0;
+            double total_ms = 0.0;
+        };
     }
 
-    std::string joinPath(const std::vector<std::string> &scopes)
+    namespace
     {
-        std::string path;
-        for (const auto &scope : scopes)
+        template <typename ShapeType>
+        std::string shapeToString(const ShapeType &shape)
         {
-            if (!path.empty())
+            std::ostringstream oss;
+            oss << "[";
+            for (size_t i = 0; i < shape.size(); ++i)
             {
-                path += ".";
+                if (i > 0)
+                {
+                    oss << ",";
+                }
+                oss << shape[i];
             }
-            path += scope;
+            oss << "]";
+            return oss.str();
         }
-        return path;
-    }
-
-    std::unordered_map<std::string, std::string> loadSimpleYaml(const fs::path &config_path)
-    {
-        std::ifstream ifs(config_path);
-        if (!ifs)
-        {
-            throw std::runtime_error("Failed to open config yaml: " + config_path.string());
-        }
-
-        std::unordered_map<std::string, std::string> values;
-        std::vector<std::string> scopes;
-        std::string line;
-        while (std::getline(ifs, line))
-        {
-            const auto comment_pos = line.find('#');
-            if (comment_pos != std::string::npos)
-            {
-                line = line.substr(0, comment_pos);
-            }
-            if (trim(line).empty())
-            {
-                continue;
-            }
-
-            const auto indent = line.find_first_not_of(' ');
-            const int level = static_cast<int>((indent == std::string::npos ? 0 : indent) / 2);
-            const auto content = trim(line);
-            const auto colon_pos = content.find(':');
-            if (colon_pos == std::string::npos)
-            {
-                continue;
-            }
-
-            const auto key = trim(content.substr(0, colon_pos));
-            const auto raw_value = trim(content.substr(colon_pos + 1));
-            if (static_cast<int>(scopes.size()) <= level)
-            {
-                scopes.resize(level + 1);
-            }
-            scopes[level] = key;
-            scopes.resize(level + 1);
-
-            if (!raw_value.empty())
-            {
-                values[joinPath(scopes)] = stripQuotes(raw_value);
-            }
-        }
-        return values;
-    }
-
-    std::string valueOr(const std::unordered_map<std::string, std::string> &values,
-                        const std::string &key,
-                        const std::string &default_value)
-    {
-        const auto it = values.find(key);
-        return it == values.end() ? default_value : it->second;
-    }
-
-    int intValueOr(const std::unordered_map<std::string, std::string> &values,
-                   const std::string &key,
-                   int default_value)
-    {
-        const auto it = values.find(key);
-        return it == values.end() ? default_value : std::stoi(it->second);
-    }
-
-    bool boolValueOr(const std::unordered_map<std::string, std::string> &values,
-                     const std::string &key,
-                     bool default_value)
-    {
-        const auto it = values.find(key);
-        return it == values.end() ? default_value : parseBool(it->second);
-    }
-
-    AppConfig loadConfig(const fs::path &config_path)
-    {
-        const auto values = loadSimpleYaml(config_path);
-        AppConfig cfg;
-        cfg.device_url = valueOr(values, "sys.device", "axi://zg330aiu?npu=0x40000000&dma=0x80000000");
-        cfg.run_backend = valueOr(values, "sys.run_backend", cfg.run_backend);
-        cfg.mmu_mode = boolValueOr(values, "sys.mmuMode", cfg.mmu_mode);
-        cfg.speed_mode = boolValueOr(values, "sys.speedMode", cfg.speed_mode);
-        cfg.compress_ftmp = boolValueOr(values, "sys.compressFtmp", cfg.compress_ftmp);
-        cfg.ocm_option = intValueOr(values, "sys.ocm_option", cfg.ocm_option);
-        cfg.enable_profile = boolValueOr(values, "sys.profile", cfg.enable_profile);
-
-        cfg.sar_img_dir = valueOr(values, "input.sar_img_dir", cfg.sar_img_dir.string());
-        cfg.sar_img_ext = valueOr(values, "input.sar_img_ext", cfg.sar_img_ext);
-        cfg.recursive = boolValueOr(values, "input.recursive", cfg.recursive);
-
-        cfg.patch_mode = valueOr(values, "pipeline.patch.mode", cfg.patch_mode);
-        cfg.patch_size = intValueOr(values, "pipeline.patch.patch_size", cfg.patch_size);
-        cfg.stride = intValueOr(values, "pipeline.patch.stride", cfg.stride);
-        cfg.json_path = valueOr(values, "pipeline.icore.json", "");
-        cfg.raw_path = valueOr(values, "pipeline.icore.raw", "");
-        cfg.output_wait_ms = intValueOr(values, "pipeline.output_wait_ms", cfg.output_wait_ms);
-
-        cfg.display_width = intValueOr(values, "display.width", cfg.display_width);
-        cfg.display_height = intValueOr(values, "display.height", cfg.display_height);
-        cfg.display_fps = intValueOr(values, "display.fps", cfg.display_fps);
-
-        cfg.output_mode = toLower(valueOr(values, "output.mode", cfg.output_mode));
-        cfg.output_dir = valueOr(values, "output.dir", cfg.output_dir.string());
-        cfg.overwrite = boolValueOr(values, "output.overwrite", cfg.overwrite);
-        cfg.dump_backend_log = boolValueOr(values, "debug.dump_backend_log", cfg.dump_backend_log);
-
-        if (!cfg.sar_img_ext.empty() && cfg.sar_img_ext.front() != '.')
-        {
-            cfg.sar_img_ext = "." + cfg.sar_img_ext;
-        }
-        if (cfg.patch_size != EXPECTED_H || cfg.patch_size != EXPECTED_W)
-        {
-            throw std::runtime_error("Only 512x512 patch_size is supported in stage 0.");
-        }
-        if (cfg.stride <= 0)
-        {
-            throw std::runtime_error("pipeline.patch.stride must be positive.");
-        }
-        if (cfg.json_path.empty() || cfg.raw_path.empty())
-        {
-            throw std::runtime_error("pipeline.icore.json/raw must be configured.");
-        }
-        if (cfg.output_mode != "hdmi" && cfg.output_mode != "png")
-        {
-            throw std::runtime_error("output.mode must be either hdmi or png.");
-        }
-        return cfg;
-    }
-
-    template <typename ShapeType>
-    std::string shapeToString(const ShapeType &shape)
-    {
-        std::ostringstream oss;
-        oss << "[";
-        for (size_t i = 0; i < shape.size(); ++i)
-        {
-            if (i > 0)
-            {
-                oss << ",";
-            }
-            oss << shape[i];
-        }
-        oss << "]";
-        return oss.str();
-    }
 
     std::int32_t readLittleEndianInt32(std::ifstream &ifs)
     {
@@ -660,12 +450,12 @@ namespace
         }
 
         std::vector<fs::path> files;
-        const auto wanted_ext = toLower(cfg.sar_img_ext);
+        const auto wanted_ext = shared::ToLower(cfg.sar_img_ext);
         if (cfg.recursive)
         {
             for (const auto &entry : fs::recursive_directory_iterator(cfg.sar_img_dir))
             {
-                if (entry.is_regular_file() && toLower(entry.path().extension().string()) == wanted_ext)
+                if (entry.is_regular_file() && shared::ToLower(entry.path().extension().string()) == wanted_ext)
                 {
                     files.push_back(entry.path());
                 }
@@ -675,7 +465,7 @@ namespace
         {
             for (const auto &entry : fs::directory_iterator(cfg.sar_img_dir))
             {
-                if (entry.is_regular_file() && toLower(entry.path().extension().string()) == wanted_ext)
+                if (entry.is_regular_file() && shared::ToLower(entry.path().extension().string()) == wanted_ext)
                 {
                     files.push_back(entry.path());
                 }
@@ -819,7 +609,7 @@ namespace
         }
         if (cfg.run_backend != "zg330")
         {
-            throw std::runtime_error("Only run_backend=zg330 or host is supported in full_workflow.");
+            throw std::runtime_error("Only run_backend=zg330 or host is supported in infer_workflow.");
         }
 
         auto session = Session::Create<icraft::xrt::zg330::ZG330Backend, HostBackend>(
@@ -914,11 +704,11 @@ namespace
     {
         if (network_view.inputs().size() != 1)
         {
-            throw std::runtime_error("full_workflow supports exactly one model input.");
+            throw std::runtime_error("infer_workflow supports exactly one model input.");
         }
         if (network_view.outputs().size() != 2)
         {
-            throw std::runtime_error("full_workflow expects exactly two model outputs: restore and seg logits.");
+            throw std::runtime_error("infer_workflow expects exactly two model outputs: restore and seg logits.");
         }
 
         const auto restore_shape = network_view.outputs()[0].tensorType()->shape;
@@ -1119,7 +909,7 @@ namespace
         }
 
     private:
-        full_workflow::RGB565HDMIDisplay<FPAIDevice> display_;
+        infer_workflow::RGB565HDMIDisplay<FPAIDevice> display_;
         int fps_ = 0;
         std::chrono::microseconds frame_interval_{0};
     };
@@ -1178,16 +968,10 @@ namespace
                      state.infer_ms,
                      state.total_ms);
     }
-}
-
-int main(int argc, char **argv)
-{
-    if (argc < 2)
-    {
-        std::cerr << "Usage: " << argv[0] << " <configs/full_workflow.yaml>\n";
-        return 1;
     }
 
+int Run(const std::filesystem::path &config_path)
+{
     Device device;
     bool device_open = false;
     try
@@ -1196,7 +980,7 @@ int main(int argc, char **argv)
         spdlog::set_level(spdlog::level::info);
 
         setStage("load config");
-        const AppConfig cfg = loadConfig(argv[1]);
+        const AppConfig cfg = LoadConfig(config_path);
         spdlog::info("Config loaded: output.mode={}, sar_img_dir={}, model_json={}",
                      cfg.output_mode,
                      cfg.sar_img_dir.string(),
@@ -1295,7 +1079,7 @@ int main(int argc, char **argv)
     }
     catch (const std::exception &e)
     {
-        spdlog::error("full_workflow failed: {}", e.what());
+        spdlog::error("infer_workflow failed: {}", e.what());
         try
         {
             if (device_open)
@@ -1309,5 +1093,4 @@ int main(int argc, char **argv)
         return 2;
     }
 }
-
-
+}

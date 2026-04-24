@@ -7,11 +7,10 @@
 
 #include <spdlog/spdlog.h>
 
-namespace full_workflow
+namespace infer_workflow
 {
-    // 本工程专用的 HDMI 显示适配层。
-    // 实现逻辑与官方 RGB565HDMIDisplay 保持一致：申请 UDMA buffer，写入 RGB565 帧，更新 HDMI 读地址。
-    // 这里不直接 include 官方 pipeline 头，避免把摄像头流程和全量 OpenCV 依赖带入 full_workflow。
+    // HDMI adapter used by the inference-stage workflow only.
+    // Keep this wrapper local so we do not pull camera/pipeline dependencies into infer_workflow.
     template <typename DeviceType>
     class RGB565HDMIDisplay
     {

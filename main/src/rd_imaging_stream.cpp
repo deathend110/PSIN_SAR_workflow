@@ -1,10 +1,13 @@
+#include "workflow/rd/rd_config.hpp"
+#include "workflow/rd/rd_workflow.hpp"
+#include "workflow/shared/config_utils.hpp"
+
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -14,215 +17,35 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
-namespace fs = std::filesystem;
-
-namespace
+namespace workflow::rd
 {
-    struct RadarConfig
-    {
-        double c = 3e8;
-        double fc = 36.01e9;
-        double B = 30e6;
-        double Tp = 1e-6;
-        double Fs = 4.0 * 30e6;
-        double PRF = 480.0;
-        double v_platform = 10.0;
-        double R0 = 400.0;
+    namespace fs = std::filesystem;
 
-        double lam() const { return c / fc; }
-        double gamma() const { return B / Tp; }
-    };
-
-    struct AppConfig
+    namespace
     {
-        fs::path echo_dir = "./io/echo";
-        std::string echo_ext = ".bin";
-        fs::path output_dir = "./io/sar_img";
-        fs::path scratch_dir = "./io/rd_scratch";
-        std::string execution_mode = "auto";
-        int column_tile = 64;
-        int row_tile = 128;
-        int memory_limit_mb = 500;
-        bool prefer_memory_pipeline = true;
-        bool keep_scratch = false;
-        bool overwrite = true;
-    };
-
-    struct EchoShape
-    {
-        int rows = 0;
-        int cols = 0;
-    };
-
-    std::string trim(std::string value)
-    {
-        const auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-        value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
-        value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
-        return value;
-    }
-
-    std::string stripQuotes(std::string value)
-    {
-        value = trim(std::move(value));
-        if (value.size() >= 2 &&
-            ((value.front() == '"' && value.back() == '"') ||
-             (value.front() == '\'' && value.back() == '\'')))
+        struct RadarConfig
         {
-            return value.substr(1, value.size() - 2);
-        }
-        return value;
-    }
+            double c = 3e8;
+            double fc = 36.01e9;
+            double B = 30e6;
+            double Tp = 1e-6;
+            double Fs = 4.0 * 30e6;
+            double PRF = 480.0;
+            double v_platform = 10.0;
+            double R0 = 400.0;
 
-    std::string toLower(std::string value)
-    {
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        return value;
-    }
+            double lam() const { return c / fc; }
+            double gamma() const { return B / Tp; }
+        };
 
-    bool parseBool(const std::string &value)
-    {
-        const auto lowered = toLower(trim(value));
-        if (lowered == "true" || lowered == "1" || lowered == "yes" || lowered == "on")
+        struct EchoShape
         {
-            return true;
-        }
-        if (lowered == "false" || lowered == "0" || lowered == "no" || lowered == "off")
-        {
-            return false;
-        }
-        throw std::runtime_error("Failed to parse bool value: " + value);
-    }
-
-    std::string joinPath(const std::vector<std::string> &scopes)
-    {
-        std::string path;
-        for (const auto &scope : scopes)
-        {
-            if (!path.empty())
-            {
-                path += ".";
-            }
-            path += scope;
-        }
-        return path;
-    }
-
-    std::unordered_map<std::string, std::string> loadSimpleYaml(const fs::path &config_path)
-    {
-        std::ifstream ifs(config_path);
-        if (!ifs)
-        {
-            throw std::runtime_error("Failed to open config yaml: " + config_path.string());
-        }
-
-        std::unordered_map<std::string, std::string> values;
-        std::vector<std::string> scopes;
-        std::string line;
-        while (std::getline(ifs, line))
-        {
-            const auto comment_pos = line.find('#');
-            if (comment_pos != std::string::npos)
-            {
-                line = line.substr(0, comment_pos);
-            }
-            if (trim(line).empty())
-            {
-                continue;
-            }
-
-            const auto indent = line.find_first_not_of(' ');
-            const int level = static_cast<int>((indent == std::string::npos ? 0 : indent) / 2);
-            const auto content = trim(line);
-            const auto colon_pos = content.find(':');
-            if (colon_pos == std::string::npos)
-            {
-                continue;
-            }
-
-            const auto key = trim(content.substr(0, colon_pos));
-            const auto raw_value = trim(content.substr(colon_pos + 1));
-            if (static_cast<int>(scopes.size()) <= level)
-            {
-                scopes.resize(level + 1);
-            }
-            scopes[level] = key;
-            scopes.resize(level + 1);
-
-            if (!raw_value.empty())
-            {
-                values[joinPath(scopes)] = stripQuotes(raw_value);
-            }
-        }
-        return values;
-    }
-
-    std::string valueOr(const std::unordered_map<std::string, std::string> &values,
-                        const std::string &key,
-                        const std::string &default_value)
-    {
-        const auto it = values.find(key);
-        return it == values.end() ? default_value : it->second;
-    }
-
-    int intValueOr(const std::unordered_map<std::string, std::string> &values,
-                   const std::string &key,
-                   int default_value)
-    {
-        const auto it = values.find(key);
-        return it == values.end() ? default_value : std::stoi(it->second);
-    }
-
-    bool boolValueOr(const std::unordered_map<std::string, std::string> &values,
-                     const std::string &key,
-                     bool default_value)
-    {
-        const auto it = values.find(key);
-        return it == values.end() ? default_value : parseBool(it->second);
-    }
-
-    AppConfig loadConfig(const fs::path &config_path)
-    {
-        const auto values = loadSimpleYaml(config_path);
-        AppConfig cfg;
-        cfg.echo_dir = valueOr(values, "rd.echo_dir", cfg.echo_dir.string());
-        cfg.echo_ext = valueOr(values, "rd.echo_ext", cfg.echo_ext);
-        cfg.output_dir = valueOr(values, "rd.output_dir", cfg.output_dir.string());
-        cfg.scratch_dir = valueOr(values, "rd.scratch_dir", cfg.scratch_dir.string());
-        cfg.execution_mode = toLower(valueOr(values, "rd.execution_mode", cfg.execution_mode));
-        cfg.column_tile = intValueOr(values, "rd.column_tile", cfg.column_tile);
-        cfg.row_tile = intValueOr(values, "rd.row_tile", cfg.row_tile);
-        cfg.memory_limit_mb = intValueOr(values, "rd.memory_limit_mb", cfg.memory_limit_mb);
-        cfg.prefer_memory_pipeline = boolValueOr(values, "rd.prefer_memory_pipeline", cfg.prefer_memory_pipeline);
-        cfg.keep_scratch = boolValueOr(values, "rd.keep_scratch", cfg.keep_scratch);
-        cfg.overwrite = boolValueOr(values, "rd.overwrite", cfg.overwrite);
-
-        if (!cfg.echo_ext.empty() && cfg.echo_ext.front() != '.')
-        {
-            cfg.echo_ext = "." + cfg.echo_ext;
-        }
-        cfg.echo_ext = toLower(cfg.echo_ext);
-        if (cfg.column_tile <= 0 || cfg.row_tile <= 0)
-        {
-            throw std::runtime_error("rd.column_tile and rd.row_tile must be positive.");
-        }
-        if (cfg.memory_limit_mb <= 0)
-        {
-            throw std::runtime_error("rd.memory_limit_mb must be positive.");
-        }
-        if (cfg.execution_mode != "auto" &&
-            cfg.execution_mode != "memory_float32" &&
-            cfg.execution_mode != "scratch_double")
-        {
-            throw std::runtime_error("rd.execution_mode must be auto, memory_float32, or scratch_double.");
-        }
-        return cfg;
-    }
+            int rows = 0;
+            int cols = 0;
+        };
 
     void logLine(const std::string &message)
     {
@@ -823,7 +646,7 @@ namespace
             {
                 continue;
             }
-            if (toLower(entry.path().extension().string()) == cfg.echo_ext)
+            if (shared::ToLower(entry.path().extension().string()) == cfg.echo_ext)
             {
                 files.push_back(entry.path());
             }
@@ -1361,19 +1184,13 @@ namespace
         const double seconds = std::chrono::duration<double>(end - start).count();
         logLine("Saved: " + output_path.string() + ", elapsed=" + std::to_string(seconds) + "s");
     }
-}
-
-int main(int argc, char **argv)
-{
-    if (argc != 2)
-    {
-        std::cerr << "Usage: " << argv[0] << " <configs/rd_imaging.yaml>\n";
-        return 1;
     }
 
+int Run(const std::filesystem::path &config_path)
+{
     try
     {
-        const AppConfig cfg = loadConfig(argv[1]);
+        const AppConfig cfg = LoadConfig(config_path);
         fs::create_directories(cfg.output_dir);
         fs::create_directories(cfg.scratch_dir);
 
@@ -1416,4 +1233,5 @@ int main(int argc, char **argv)
         std::cerr << "rd_imaging_stream failed: " << e.what() << std::endl;
         return 1;
     }
+}
 }

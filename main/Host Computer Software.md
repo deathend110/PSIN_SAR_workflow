@@ -13,18 +13,7 @@
 
 这个改动最直接，也最适合答辩/演示。
 
-**第二阶段再做显示模式切换**
-推荐先实现这些模式：
-
-- `SHOW_SAR`
-- `SHOW_RESTORE`
-- `SHOW_SEG`
-- `SHOW_OVERLAY`
-- `SHOW_COMPARE`
-
-HDMI 默认可以用你文档里说的“左侧图像 + 右侧状态栏”，分辨率优先按 `1920 1080` 设计，这个判断也很实际。
-
-**第三阶段再做 Web 控制台**
+**第二阶段再做 Web 控制台**
 Web 控制台负责：
 
 - start / pause / stop / reset

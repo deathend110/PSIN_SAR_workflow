@@ -1,7 +1,7 @@
 ﻿cmake_minimum_required(VERSION 3.16)
 
 if(WIN32)
-    message(FATAL_ERROR "examples/2_Full_workflow is Linux/ZG only. Windows builds are intentionally unsupported for this stage.")
+    message(FATAL_ERROR "main/ psin_workflow is Linux/ZG only. Windows builds are intentionally unsupported for this stage.")
 endif()
 
 set(CMAKE_SYSTEM_NAME Linux)
@@ -10,7 +10,7 @@ set(CMAKE_C_COMPILER /usr/bin/aarch64-linux-gnu-gcc)
 set(CMAKE_CXX_COMPILER /usr/bin/aarch64-linux-gnu-g++)
 set(CMAKE_BUILD_TYPE Release)
 
-project(FullWorkflow LANGUAGES CXX)
+project(PSINWorkflow LANGUAGES CXX)
 
 message(STATUS "Project name: ${PROJECT_NAME}")
 message(STATUS "Project source dir: ${PROJECT_SOURCE_DIR}")
@@ -23,7 +23,7 @@ file(MAKE_DIRECTORY ${PROJECT_SOURCE_DIR}/log)
 
 add_compile_definitions(USE_ZG330_BACKEND)
 
-set(DEPS_DIR ../../deps)
+set(DEPS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps)
 
 set(THIRDPARTY_INCLUDES
     ${DEPS_DIR}/thirdparty/include
@@ -54,22 +54,20 @@ link_directories(${DEPS_DIR}/thirdparty/a)
 find_package(Icraft-HostBackend REQUIRED)
 find_package(icraft-zg330backend REQUIRED)
 
-add_executable(full_workflow src/full_workflow.cpp)
-target_include_directories(full_workflow PRIVATE ${COMMON_INCLUDE_DIRS})
-target_link_libraries(full_workflow
+add_executable(psin_workflow
+    src/main.cpp
+    src/config_utils.cpp
+    src/rd_config.cpp
+    src/rd_imaging_stream.cpp
+    src/infer_config.cpp
+    src/infer_workflow.cpp
+)
+target_include_directories(psin_workflow PRIVATE ${COMMON_INCLUDE_DIRS})
+target_link_libraries(psin_workflow
     PRIVATE
     Icraft::HostBackend Icraft::ZG330Backend
     avformat avdevice avfilter avcodec avutil swscale swresample
     ${OPENCV_STATIC_LIBS}
     fmt pthread dl zlib ssl crypto atomic
-    $<$<CXX_COMPILER_ID:GNU>:stdc++fs>
-)
-
-add_executable(rd_imaging_stream src/rd_imaging_stream.cpp)
-target_include_directories(rd_imaging_stream PRIVATE ${COMMON_INCLUDE_DIRS})
-target_link_libraries(rd_imaging_stream
-    PRIVATE
-    ${OPENCV_STATIC_LIBS}
-    pthread dl zlib ssl crypto atomic
     $<$<CXX_COMPILER_ID:GNU>:stdc++fs>
 )
