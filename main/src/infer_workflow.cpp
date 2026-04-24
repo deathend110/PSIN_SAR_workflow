@@ -1742,12 +1742,28 @@ namespace workflow::infer
                 RuntimeState current_state = placeholder_state;
                 InferenceSnapshot current_snapshot;
                 std::uint64_t current_sequence = 0;
+                auto next_present_time = std::chrono::steady_clock::now();
 
                 while (true)
                 {
-                    writeFrame(current_state, current_frame);
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now >= next_present_time)
+                    {
+                        writeFrame(current_state, current_frame);
+                        next_present_time += display_interval_;
 
-                    const auto wake_reason = mailbox_.waitForChangeOrStop(current_sequence, display_interval_);
+                        const auto after_present = std::chrono::steady_clock::now();
+                        while (next_present_time <= after_present)
+                        {
+                            next_present_time += display_interval_;
+                        }
+                    }
+
+                    const auto wait_now = std::chrono::steady_clock::now();
+                    const auto wait_timeout = next_present_time > wait_now
+                                                  ? std::chrono::duration_cast<std::chrono::microseconds>(next_present_time - wait_now)
+                                                  : std::chrono::microseconds(0);
+                    const auto wake_reason = mailbox_.waitForChangeOrStop(current_sequence, wait_timeout);
                     if (wake_reason == LatestSnapshotMailbox::WakeReason::StopRequested)
                     {
                         return;
@@ -1787,6 +1803,10 @@ namespace workflow::infer
 
         void writeFrame(const RuntimeState &state, const cv::Mat &frame_bgr)
         {
+            // Phase 2 keeps HDMI and inference device access serialized on purpose.
+            // This means HDMI is not strictly real-time under heavy inference load, but
+            // it removes direct producer-side sleep blocking without risking unsafe
+            // concurrent access to the underlying device/driver.
             std::lock_guard<std::mutex> device_lock(device_access_mutex_);
             sink_.write(state, frame_bgr);
         }
@@ -1888,6 +1908,9 @@ namespace workflow::infer
         const auto infer_start = std::chrono::steady_clock::now();
         std::vector<Tensor> host_outputs;
         {
+            // Phase 2 deliberately serializes the whole forward/wait/copy/reset window
+            // against HDMI writes. The accepted tradeoff is "non-strict-real-time HDMI"
+            // rather than unsafely overlapping display_.show(...) with device.reset(1).
             std::lock_guard<std::mutex> device_lock(device_access_mutex);
             host_outputs = runner.forward(input_tensor);
         }
