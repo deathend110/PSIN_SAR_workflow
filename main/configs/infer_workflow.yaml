@@ -32,7 +32,7 @@ sys:
 input:
   # SAR 成像结果图片目录。程序会按文件名排序逐个处理。
   # 当前第 0 阶段直接读取这里的 SAR 图片，不再在板端执行 echo -> RD 成像，避免 1GB 内存下 OOM。
-  sar_img_dir: ./io/sar_img
+  sar_img_dir: ./io/input_img
 
   # SAR 图片扩展名。默认读取 .png。
   sar_img_ext: .png
@@ -50,7 +50,7 @@ pipeline:
     patch_size: 512
 
     # 自动蛇形扫描步长。256 表示横向/纵向 50% overlap，边缘不足完整 patch 的区域丢弃。
-    stride: 256
+    stride: 128
 
   icore:
     json: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_ZG.json
@@ -73,7 +73,7 @@ display:
 output:
   # 输出模式：
   # hdmi = 直接送 HDMI 显示；png = 在板端保存 PNG 调试图，不走 HDMI。
-  mode: hdmi
+  mode: png
 
   # png 模式下的输出目录。实际路径为：dir/<sar_image_stem>/patch_000000.png。
   dir: ./io/output

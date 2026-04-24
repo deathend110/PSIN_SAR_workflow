@@ -97,7 +97,7 @@ workflow::infer::Run
 | `ManualFlightPatchSource` | `main/src/infer_workflow.cpp` | 预留的手动巡航 patch 接口，当前未接主流程 |
 | `PatchTensorBuilder` | `main/src/infer_workflow.cpp` | 校验输入 shape/dtype，并把 patch 构造成 Host FP32 tensor |
 | `PatchInferenceRunner` | `main/src/infer_workflow.cpp` | 封装 `session.forward -> waitForReady -> host copy -> device.reset(1)` |
-| `MiniMapContext` | `main/src/infer_workflow.cpp` | 承载整张 SAR 缩略图、小地图红框映射和蛇形扫描路径 |
+| `MiniMapContext` | `main/src/infer_workflow.cpp` | 承载整张 SAR 缩略图和小地图红框映射 |
 | `UiRenderContext` | `main/src/infer_workflow.cpp` | 承载模式、输出信息和最终 UI 合成需要的上下文 |
 | `IFrameSink` | `main/src/infer_workflow.cpp` | 最终输出抽象接口 |
 | `PngFrameSink` | `main/src/infer_workflow.cpp` | 写 `io/output/<stem>/patch_*.png` |

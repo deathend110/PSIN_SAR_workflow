@@ -118,12 +118,12 @@ namespace workflow::infer
             double fps = 0.0;
             double infer_ms = 0.0;
             double total_ms = 0.0;
+            int stride = 256;
         };
 
         struct MiniMapContext
         {
             cv::Mat sar_preview_bgr;
-            std::vector<cv::Point2f> snake_centers;
             int source_width = 0;
             int source_height = 0;
             int patch_size = 0;
@@ -131,7 +131,6 @@ namespace workflow::infer
 
         struct UiRenderContext
         {
-            std::string project_title = "PSIN WORKFLOW";
             std::string status_label = "RUNNING";
             std::string mode_label = "INFERENCE ONLY";
             std::string output_label;
@@ -983,29 +982,13 @@ namespace workflow::infer
         return sar_bgr;
     }
 
-    std::vector<cv::Point2f> buildSnakeCenters(int rows, int cols, int stride, int patch_size)
-    {
-        std::vector<cv::Point2f> centers;
-        centers.reserve(std::max(0, rows * cols));
-        for (int row = 0; row < rows; ++row)
-        {
-            const bool right_to_left = (row % 2) == 1;
-            for (int order = 0; order < cols; ++order)
-            {
-                const int col = right_to_left ? (cols - 1 - order) : order;
-                const float x = static_cast<float>(col * stride + patch_size / 2);
-                const float y = static_cast<float>(row * stride + patch_size / 2);
-                centers.emplace_back(x, y);
-            }
-        }
-        return centers;
-    }
-
     MiniMapContext buildMiniMapContext(const cv::Mat &sar_norm, int patch_size, int stride, int rows, int cols)
     {
+        (void)stride;
+        (void)rows;
+        (void)cols;
         MiniMapContext context;
         context.sar_preview_bgr = normalizedSarToBgr(sar_norm);
-        context.snake_centers = buildSnakeCenters(rows, cols, stride, patch_size);
         context.source_width = sar_norm.cols;
         context.source_height = sar_norm.rows;
         context.patch_size = patch_size;
@@ -1042,36 +1025,6 @@ namespace workflow::infer
         oss.precision(1);
         oss << value;
         return oss.str();
-    }
-
-    void drawDashedLine(cv::Mat &canvas,
-                        const cv::Point &start,
-                        const cv::Point &end,
-                        const cv::Scalar &color,
-                        int thickness,
-                        int dash_length,
-                        int gap_length)
-    {
-        const cv::Point2f delta = cv::Point2f(static_cast<float>(end.x - start.x),
-                                              static_cast<float>(end.y - start.y));
-        const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y);
-        if (length < 1.0f)
-        {
-            return;
-        }
-
-        const cv::Point2f direction(delta.x / length, delta.y / length);
-        float cursor = 0.0f;
-        while (cursor < length)
-        {
-            const float segment_end = std::min(length, cursor + static_cast<float>(dash_length));
-            const cv::Point segment_start(static_cast<int>(std::round(start.x + direction.x * cursor)),
-                                          static_cast<int>(std::round(start.y + direction.y * cursor)));
-            const cv::Point segment_finish(static_cast<int>(std::round(start.x + direction.x * segment_end)),
-                                           static_cast<int>(std::round(start.y + direction.y * segment_end)));
-            cv::line(canvas, segment_start, segment_finish, color, thickness, cv::LINE_AA);
-            cursor += static_cast<float>(dash_length + gap_length);
-        }
     }
 
     cv::Point mapPointToRect(const cv::Point2f &point, const MiniMapContext &context, const cv::Rect &target_rect)
@@ -1147,7 +1100,6 @@ namespace workflow::infer
                      const cv::Rect &body_rect,
                      const MiniMapContext &context,
                      const PatchInfo &patch,
-                     const cv::Scalar &accent_color,
                      const cv::Scalar &patch_color,
                      const cv::Scalar &border_color)
     {
@@ -1156,16 +1108,6 @@ namespace workflow::infer
         drawGridTexture(canvas, body_rect, std::max(14, body_rect.width / 12), cv::Scalar(248, 250, 252));
 
         const cv::Rect image_rect = drawFittedImage(context.sar_preview_bgr, canvas, insetRect(body_rect, 8, 8), cv::INTER_LINEAR);
-        for (size_t i = 1; i < context.snake_centers.size(); ++i)
-        {
-            drawDashedLine(canvas,
-                           mapPointToRect(context.snake_centers[i - 1], context, image_rect),
-                           mapPointToRect(context.snake_centers[i], context, image_rect),
-                           accent_color,
-                           std::max(1, body_rect.width / 160),
-                           std::max(5, body_rect.width / 42),
-                           std::max(4, body_rect.width / 52));
-        }
 
         const double scale_x = context.source_width > 0 ? static_cast<double>(image_rect.width) / context.source_width : 1.0;
         const double scale_y = context.source_height > 0 ? static_cast<double>(image_rect.height) / context.source_height : 1.0;
@@ -1182,24 +1124,6 @@ namespace workflow::infer
         cv::circle(canvas, current_center, std::max(3, body_rect.width / 70), patch_color, cv::FILLED, cv::LINE_AA);
         cv::circle(canvas, current_center, std::max(5, body_rect.width / 50), cv::Scalar(190, 24, 24), 1, cv::LINE_AA);
 
-        const std::string center_label = "CENTER " + std::to_string(patch.x + patch.width / 2) + ", " +
-                                         std::to_string(patch.y + patch.height / 2);
-        const int footer_height = std::max(24, body_rect.height / 8);
-        const cv::Rect footer_rect(body_rect.x + 8, body_rect.br().y - footer_height - 8, body_rect.width - 16, footer_height);
-        cv::rectangle(canvas, footer_rect, cv::Scalar(238, 242, 246), cv::FILLED);
-        cv::rectangle(canvas, footer_rect, border_color, 1, cv::LINE_AA);
-        const int font_face = cv::FONT_HERSHEY_SIMPLEX;
-        const double font_scale = std::max(0.32, footer_height / 56.0);
-        const int thickness = std::max(1, footer_height / 18);
-        const std::string clipped_center = truncateToWidth(center_label, footer_rect.width - 12, font_face, font_scale, thickness);
-        cv::putText(canvas,
-                    clipped_center,
-                    cv::Point(footer_rect.x + 6, footer_rect.y + footer_rect.height / 2 + footer_height / 8),
-                    font_face,
-                    font_scale,
-                    cv::Scalar(51, 65, 85),
-                    thickness,
-                    cv::LINE_AA);
     }
 
     void drawLegend(cv::Mat &canvas, const cv::Rect &panel_rect)
@@ -1272,7 +1196,6 @@ namespace workflow::infer
         const cv::Scalar border_color(154, 163, 175);
         const cv::Scalar title_color(15, 23, 42);
         const cv::Scalar subtitle_color(71, 85, 105);
-        const cv::Scalar accent_color(125, 211, 252);
         const cv::Scalar success_color(34, 197, 94);
         const cv::Scalar patch_color(239, 68, 68);
 
@@ -1294,27 +1217,11 @@ namespace workflow::infer
         const int header_pad = std::max(12, width / 96);
         const int font_face = cv::FONT_HERSHEY_SIMPLEX;
         const double eyebrow_scale = std::max(0.4, header_height / 74.0);
-        const double title_scale = std::max(0.75, header_height / 44.0);
         const int eyebrow_thickness = std::max(1, header_height / 28);
-        const int title_thickness = std::max(1, header_height / 18);
         const int badge_height = std::max(30, header_height / 2);
         const int badge_gap = std::max(8, header_pad / 2);
         const int badge_width = std::max(120, shell_rect.width / 8);
-        const int logo_size = std::max(36, header_height / 2);
-
-        const cv::Rect logo_rect(header_rect.x + header_pad, header_rect.y + (header_rect.height - logo_size) / 2, logo_size, logo_size);
-        cv::rectangle(canvas, logo_rect, cv::Scalar(246, 248, 251), cv::FILLED);
-        cv::rectangle(canvas, logo_rect, cv::Scalar(89, 98, 112), 1, cv::LINE_AA);
-        cv::putText(canvas,
-                    "SAR",
-                    cv::Point(logo_rect.x + logo_size / 6, logo_rect.y + logo_rect.height / 2 + logo_size / 8),
-                    font_face,
-                    std::max(0.45, logo_size / 56.0),
-                    cv::Scalar(55, 65, 81),
-                    std::max(1, logo_size / 18),
-                    cv::LINE_AA);
-
-        const int title_x = header_rect.x + header_pad * 2 + logo_size;
+        const int title_x = header_rect.x + header_pad * 2 + std::max(36, header_height / 2);
         cv::putText(canvas,
                     "EDGE AI CONTROL TERMINAL",
                     cv::Point(title_x, header_rect.y + header_pad + header_rect.height / 4),
@@ -1322,14 +1229,6 @@ namespace workflow::infer
                     eyebrow_scale,
                     subtitle_color,
                     eyebrow_thickness,
-                    cv::LINE_AA);
-        cv::putText(canvas,
-                    truncateToWidth(ui_context.project_title, header_rect.width / 2, font_face, title_scale, title_thickness),
-                    cv::Point(title_x, header_rect.y + header_rect.height - header_pad - header_rect.height / 6),
-                    font_face,
-                    title_scale,
-                    title_color,
-                    title_thickness,
                     cv::LINE_AA);
 
         auto drawBadge = [&](int x, const std::string &label, const cv::Scalar &text_color, bool with_dot) {
@@ -1383,7 +1282,7 @@ namespace workflow::infer
                                        std::max(1, left_column.br().y - (map_panel.br().y + gap)));
         const cv::Rect map_body = drawPanel(canvas,
                                             map_panel,
-                                            "GLOBAL MAP",
+                                            "",
                                             "SCENE LOCATOR",
                                             panel_header,
                                             panel_bg,
@@ -1391,11 +1290,11 @@ namespace workflow::infer
                                             border_color,
                                             title_color,
                                             subtitle_color);
-        drawMiniMap(canvas, map_body, ui_context.mini_map, state.patch, accent_color, patch_color, border_color);
+        drawMiniMap(canvas, map_body, ui_context.mini_map, state.patch, patch_color, border_color);
 
         const cv::Rect telemetry_body = drawPanel(canvas,
                                                   telemetry_panel,
-                                                  "TELEMETRY",
+                                                  "",
                                                   "RUNTIME MONITOR",
                                                   panel_header,
                                                   panel_bg,
@@ -1414,7 +1313,6 @@ namespace workflow::infer
             {"FRAME", formatFrameCounter(state.frame_index)},
             {"SAR_NAME", state.sar_stem},
             {"GRID_RC", std::to_string(state.patch.grid_row) + ", " + std::to_string(state.patch.grid_col)},
-            {"PATCH_XY", std::to_string(state.patch.x) + ", " + std::to_string(state.patch.y)},
             {"FPS", formatFps(state.fps)},
             {"NPU_MS", formatMillis(state.infer_ms)},
             {"TOTAL_MS", formatMillis(state.total_ms)}};
@@ -1451,7 +1349,7 @@ namespace workflow::infer
                                std::to_string(state.patch.y + state.patch.height / 2)),
             std::make_pair(std::string("PATCH RULE"),
                            std::to_string(state.patch.width) + "x" + std::to_string(state.patch.height) +
-                               " / stride 256")};
+                               " / stride " + std::to_string(state.stride))};
 
         for (size_t i = 0; i < status_cells.size(); ++i)
         {
@@ -1569,7 +1467,7 @@ namespace workflow::infer
         cv::rectangle(canvas, footer_rect, panel_bg, cv::FILLED);
         cv::rectangle(canvas, footer_rect, border_color, 1, cv::LINE_AA);
         const double footer_scale = std::max(0.38, footer_rect.height / 70.0);
-        const std::string left_footer = truncateToWidth("AUTO_SNAKE / PATCH 512x512 / STRIDE 256",
+        const std::string left_footer = truncateToWidth("AUTO_SNAKE / PATCH 512x512 / STRIDE " + std::to_string(state.stride),
                                                         footer_rect.width / 2,
                                                         font_face,
                                                         footer_scale,
@@ -1838,6 +1736,7 @@ int Run(const std::filesystem::path &config_path)
 
             SnakePatchSource patch_source(sar_norm, cfg.patch_size, cfg.stride);
             base_state.patch_count = patch_source.totalPatches();
+            base_state.stride = cfg.stride;
             spdlog::info("Patch grid for {}: rows={}, cols={}, total={}",
                          base_state.sar_stem,
                          patch_source.rows(),
