@@ -20,15 +20,18 @@
 #include <chrono>
 #include <csignal>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -137,6 +140,14 @@ namespace workflow::infer
             std::string restore_label = "GRAY OUTPUT";
             std::string seg_label = "RGB MASK / 6 CLASS";
             MiniMapContext mini_map;
+        };
+
+        struct InferenceSnapshot
+        {
+            RuntimeState state;
+            UiRenderContext ui_context;
+            cv::Mat restore_bgr;
+            cv::Mat mask_bgr;
         };
     }
 
@@ -1521,6 +1532,83 @@ namespace workflow::infer
         return "PNG / " + cfg.output_dir.string();
     }
 
+    class LatestSnapshotMailbox
+    {
+    public:
+        // Phase 2 intentionally uses latest-state handoff rather than FIFO buffering:
+        // the producer always overwrites the previous snapshot and the consumer always
+        // renders the newest complete snapshot available at display time.
+        enum class WakeReason
+        {
+            Timeout,
+            NewSnapshot,
+            InputClosed,
+            StopRequested,
+        };
+
+        void publish(InferenceSnapshot &&snapshot)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            latest_snapshot_ = std::move(snapshot);
+            ++published_sequence_;
+            cv_.notify_all();
+        }
+
+        bool loadLatest(InferenceSnapshot &snapshot, std::uint64_t &sequence)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!latest_snapshot_.has_value())
+            {
+                return false;
+            }
+            snapshot = *latest_snapshot_;
+            sequence = published_sequence_;
+            return true;
+        }
+
+        WakeReason waitForChangeOrStop(std::uint64_t known_sequence, std::chrono::microseconds timeout)
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (!cv_.wait_for(lock, timeout, [&] {
+                    return stop_requested_ || input_closed_ || published_sequence_ != known_sequence;
+                }))
+            {
+                return WakeReason::Timeout;
+            }
+            if (stop_requested_)
+            {
+                return WakeReason::StopRequested;
+            }
+            if (published_sequence_ != known_sequence)
+            {
+                return WakeReason::NewSnapshot;
+            }
+            return WakeReason::InputClosed;
+        }
+
+        void markInputClosed()
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            input_closed_ = true;
+            cv_.notify_all();
+        }
+
+        void requestStop()
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_requested_ = true;
+            cv_.notify_all();
+        }
+
+    private:
+        std::mutex mutex_;
+        std::condition_variable cv_;
+        std::optional<InferenceSnapshot> latest_snapshot_;
+        std::uint64_t published_sequence_ = 0;
+        bool input_closed_ = false;
+        bool stop_requested_ = false;
+    };
+
     class IFrameSink
     {
     public:
@@ -1565,33 +1653,154 @@ namespace workflow::infer
         HdmiFrameSink(FPAIDevice &device, int width, int height, int fps)
             : display_(0, device, width, height), fps_(fps)
         {
-            if (fps_ > 0)
-            {
-                frame_interval_ = std::chrono::microseconds(1000000 / fps_);
-            }
         }
 
         void write(const RuntimeState &, const cv::Mat &frame_bgr) override
         {
-            const auto start = std::chrono::steady_clock::now();
             cv::Mat rgb565;
             cv::cvtColor(frame_bgr, rgb565, cv::COLOR_BGR2BGR565);
             display_.show(reinterpret_cast<int8_t *>(rgb565.data));
-            if (frame_interval_.count() > 0)
-            {
-                const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - start);
-                if (elapsed < frame_interval_)
-                {
-                    std::this_thread::sleep_for(frame_interval_ - elapsed);
-                }
-            }
         }
 
     private:
         infer_workflow::RGB565HDMIDisplay<FPAIDevice> display_;
         int fps_ = 0;
-        std::chrono::microseconds frame_interval_{0};
+    };
+
+    class HdmiRenderWorker
+    {
+    public:
+        HdmiRenderWorker(IFrameSink &sink,
+                         LatestSnapshotMailbox &mailbox,
+                         const UiRenderContext &placeholder_ui_context,
+                         int display_width,
+                         int display_height,
+                         int display_fps,
+                         std::mutex &device_access_mutex)
+            : sink_(sink),
+              mailbox_(mailbox),
+              placeholder_ui_context_(placeholder_ui_context),
+              display_width_(display_width),
+              display_height_(display_height),
+              display_interval_(display_fps > 0 ? std::chrono::microseconds(1000000 / display_fps)
+                                                : std::chrono::microseconds(33333)),
+              device_access_mutex_(device_access_mutex)
+        {
+        }
+
+        void start()
+        {
+            worker_ = std::thread(&HdmiRenderWorker::run, this);
+        }
+
+        void requestStop()
+        {
+            mailbox_.requestStop();
+        }
+
+        void join()
+        {
+            if (worker_.joinable())
+            {
+                worker_.join();
+            }
+            rethrowIfFailed();
+        }
+
+        void rethrowIfFailed()
+        {
+            std::lock_guard<std::mutex> lock(error_mutex_);
+            if (worker_error_ != nullptr)
+            {
+                std::rethrow_exception(worker_error_);
+            }
+        }
+
+    private:
+        void run()
+        {
+            try
+            {
+                RuntimeState placeholder_state;
+                placeholder_state.sar_stem = "WAITING";
+                placeholder_state.patch.width = EXPECTED_W;
+                placeholder_state.patch.height = EXPECTED_H;
+                placeholder_state.stride = EXPECTED_W / 2;
+
+                UiRenderContext waiting_ui = placeholder_ui_context_;
+                waiting_ui.status_label = "WAITING";
+
+                cv::Mat empty_restore(EXPECTED_H, EXPECTED_W, CV_8UC3, cv::Scalar(0, 0, 0));
+                cv::Mat empty_mask(EXPECTED_H, EXPECTED_W, CV_8UC3, cv::Scalar(0, 0, 0));
+
+                cv::Mat current_frame = composeIndustrialUiFrame(waiting_ui,
+                                                                 placeholder_state,
+                                                                 empty_restore,
+                                                                 empty_mask,
+                                                                 display_width_,
+                                                                 display_height_);
+                RuntimeState current_state = placeholder_state;
+                InferenceSnapshot current_snapshot;
+                std::uint64_t current_sequence = 0;
+
+                while (true)
+                {
+                    writeFrame(current_state, current_frame);
+
+                    const auto wake_reason = mailbox_.waitForChangeOrStop(current_sequence, display_interval_);
+                    if (wake_reason == LatestSnapshotMailbox::WakeReason::StopRequested)
+                    {
+                        return;
+                    }
+
+                    InferenceSnapshot latest_snapshot;
+                    std::uint64_t latest_sequence = current_sequence;
+                    if (mailbox_.loadLatest(latest_snapshot, latest_sequence) && latest_sequence != current_sequence)
+                    {
+                        current_snapshot = std::move(latest_snapshot);
+                        current_sequence = latest_sequence;
+                        current_frame = composeIndustrialUiFrame(current_snapshot.ui_context,
+                                                                 current_snapshot.state,
+                                                                 current_snapshot.restore_bgr,
+                                                                 current_snapshot.mask_bgr,
+                                                                 display_width_,
+                                                                 display_height_);
+                        current_state = current_snapshot.state;
+                        continue;
+                    }
+
+                    if (wake_reason == LatestSnapshotMailbox::WakeReason::InputClosed)
+                    {
+                        return;
+                    }
+                }
+            }
+            catch (...)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(error_mutex_);
+                    worker_error_ = std::current_exception();
+                }
+                mailbox_.requestStop();
+            }
+        }
+
+        void writeFrame(const RuntimeState &state, const cv::Mat &frame_bgr)
+        {
+            std::lock_guard<std::mutex> device_lock(device_access_mutex_);
+            sink_.write(state, frame_bgr);
+        }
+
+        IFrameSink &sink_;
+        LatestSnapshotMailbox &mailbox_;
+        UiRenderContext placeholder_ui_context_;
+        int display_width_ = 1920;
+        int display_height_ = 1080;
+        std::chrono::microseconds display_interval_{0};
+        std::mutex &device_access_mutex_;
+        std::thread worker_;
+        std::mutex error_mutex_;
+        std::exception_ptr worker_error_;
     };
 
     void emitBackendLogIfRequested(const AppConfig &cfg, Session &session)
@@ -1610,14 +1819,14 @@ namespace workflow::infer
         spdlog::info("ZG330 backend log requested. Check .icraft/logs for generate_memopt.log.");
     }
 
-    void processPatch(const PatchPacket &packet,
-                      const RuntimeState &base_state,
-                      const UiRenderContext &ui_context,
-                      PatchTensorBuilder &tensor_builder,
-                      PatchInferenceRunner &runner,
-                      IFrameSink &sink,
-                      const AppConfig &cfg,
-                      int &frame_counter)
+    void processPatchToPng(const PatchPacket &packet,
+                           const RuntimeState &base_state,
+                           const UiRenderContext &ui_context,
+                           PatchTensorBuilder &tensor_builder,
+                           PatchInferenceRunner &runner,
+                           IFrameSink &sink,
+                           const AppConfig &cfg,
+                           int &frame_counter)
     {
         RuntimeState state = base_state;
         state.patch = packet.info;
@@ -1658,12 +1867,79 @@ namespace workflow::infer
                      state.total_ms,
                      state.fps);
     }
+
+    void processPatchToHdmi(const PatchPacket &packet,
+                            const RuntimeState &base_state,
+                            const UiRenderContext &ui_context,
+                            PatchTensorBuilder &tensor_builder,
+                            PatchInferenceRunner &runner,
+                            std::mutex &device_access_mutex,
+                            LatestSnapshotMailbox &mailbox,
+                            HdmiRenderWorker &render_worker,
+                            int &frame_counter)
+    {
+        render_worker.rethrowIfFailed();
+
+        RuntimeState state = base_state;
+        state.patch = packet.info;
+        const auto patch_start = std::chrono::steady_clock::now();
+
+        Tensor input_tensor = tensor_builder.build(packet.patch_norm);
+        const auto infer_start = std::chrono::steady_clock::now();
+        std::vector<Tensor> host_outputs;
+        {
+            std::lock_guard<std::mutex> device_lock(device_access_mutex);
+            host_outputs = runner.forward(input_tensor);
+        }
+        const auto infer_end = std::chrono::steady_clock::now();
+
+        cv::Mat restore_gray = restoreToGrayU8(host_outputs[0]);
+        cv::Mat restore_bgr;
+        cv::cvtColor(restore_gray, restore_bgr, cv::COLOR_GRAY2BGR);
+        cv::Mat mask_bgr = logitsToMaskBgr(host_outputs[1]);
+
+        state.infer_ms = std::chrono::duration<double, std::milli>(infer_end - infer_start).count();
+
+        // Phase 2 metrics stop at the producer-side snapshot handoff boundary so HDMI
+        // display cadence, BGR565 conversion, and register writes do not distort infer fps.
+        const int next_frame_index = frame_counter + 1;
+        state.frame_index = next_frame_index;
+        state.total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - patch_start).count();
+        state.fps = state.total_ms > 0.0 ? (1000.0 / state.total_ms) : 0.0;
+
+        InferenceSnapshot snapshot;
+        snapshot.state = state;
+        snapshot.ui_context = ui_context;
+        snapshot.restore_bgr = std::move(restore_bgr);
+        snapshot.mask_bgr = std::move(mask_bgr);
+        mailbox.publish(std::move(snapshot));
+
+        frame_counter = next_frame_index;
+        render_worker.rethrowIfFailed();
+
+        spdlog::info("[{}/{}] {} patch #{}/{} frame={} row={} col={} x={} y={} infer={:.2f}ms total={:.2f}ms fps={:.1f} [snapshot->hdmi]",
+                     state.sar_index,
+                     state.sar_count,
+                     state.sar_stem,
+                     state.patch.index + 1,
+                     state.patch_count,
+                     state.frame_index,
+                     state.patch.grid_row,
+                     state.patch.grid_col,
+                     state.patch.x,
+                     state.patch.y,
+                     state.infer_ms,
+                     state.total_ms,
+                     state.fps);
+    }
     }
 
 int Run(const std::filesystem::path &config_path)
 {
     Device device;
     bool device_open = false;
+    std::optional<LatestSnapshotMailbox> hdmi_mailbox;
+    std::unique_ptr<HdmiRenderWorker> hdmi_render_worker;
     try
     {
         std::signal(SIGSEGV, handleSegfault);
@@ -1711,10 +1987,26 @@ int Run(const std::filesystem::path &config_path)
         setStage("create output sink");
         std::unique_ptr<IFrameSink> sink;
         std::optional<FPAIDevice> fpai_device;
+        std::mutex device_access_mutex;
         if (cfg.output_mode == "hdmi")
         {
             fpai_device.emplace(device.cast<FPAIDevice>());
             sink = std::make_unique<HdmiFrameSink>(*fpai_device, cfg.display_width, cfg.display_height, cfg.display_fps);
+            UiRenderContext placeholder_ui_context;
+            placeholder_ui_context.output_label = buildOutputLabel(cfg);
+            placeholder_ui_context.mini_map.source_width = EXPECTED_W;
+            placeholder_ui_context.mini_map.source_height = EXPECTED_H;
+            placeholder_ui_context.mini_map.patch_size = EXPECTED_W;
+            placeholder_ui_context.mini_map.sar_preview_bgr = cv::Mat(EXPECTED_H, EXPECTED_W, CV_8UC3, cv::Scalar(0, 0, 0));
+            hdmi_mailbox.emplace();
+            hdmi_render_worker = std::make_unique<HdmiRenderWorker>(*sink,
+                                                                    *hdmi_mailbox,
+                                                                    placeholder_ui_context,
+                                                                    cfg.display_width,
+                                                                    cfg.display_height,
+                                                                    cfg.display_fps,
+                                                                    device_access_mutex);
+            hdmi_render_worker->start();
         }
         else
         {
@@ -1722,7 +2014,9 @@ int Run(const std::filesystem::path &config_path)
         }
 
         setStage("create inference runner");
-        PatchInferenceRunner runner(session, device, cfg.output_wait_ms);
+        PatchInferenceRunner runner(session,
+                                    device,
+                                    cfg.output_wait_ms);
         int frame_counter = 0;
 
         for (size_t sar_idx = 0; sar_idx < sar_files.size(); ++sar_idx)
@@ -1763,8 +2057,39 @@ int Run(const std::filesystem::path &config_path)
             PatchPacket packet;
             while (patch_source.next(packet))
             {
-                processPatch(packet, base_state, ui_context, tensor_builder, runner, *sink, cfg, frame_counter);
+                if (cfg.output_mode == "hdmi")
+                {
+                    processPatchToHdmi(packet,
+                                       base_state,
+                                       ui_context,
+                                       tensor_builder,
+                                       runner,
+                                       device_access_mutex,
+                                       *hdmi_mailbox,
+                                       *hdmi_render_worker,
+                                       frame_counter);
+                }
+                else
+                {
+                    processPatchToPng(packet,
+                                      base_state,
+                                      ui_context,
+                                      tensor_builder,
+                                      runner,
+                                      *sink,
+                                      cfg,
+                                      frame_counter);
+                }
             }
+        }
+
+        if (hdmi_mailbox.has_value())
+        {
+            hdmi_mailbox->markInputClosed();
+        }
+        if (hdmi_render_worker != nullptr)
+        {
+            hdmi_render_worker->join();
         }
 
         if (device_open)
@@ -1779,6 +2104,14 @@ int Run(const std::filesystem::path &config_path)
         spdlog::error("infer_workflow failed: {}", e.what());
         try
         {
+            if (hdmi_mailbox.has_value())
+            {
+                hdmi_mailbox->requestStop();
+            }
+            if (hdmi_render_worker != nullptr)
+            {
+                hdmi_render_worker->join();
+            }
             if (device_open)
             {
                 Device::Close(device);
