@@ -77,7 +77,8 @@ workflow::infer::Run
           -> PatchInferenceRunner::forward
           -> restoreToGrayU8
           -> logitsToMaskBgr
-          -> composeSideBySide
+          -> buildMiniMapContext
+          -> composeIndustrialUiFrame
           -> sink.write
  -> Device::Close
 ```
@@ -96,13 +97,15 @@ workflow::infer::Run
 | `ManualFlightPatchSource` | `main/src/infer_workflow.cpp` | 预留的手动巡航 patch 接口，当前未接主流程 |
 | `PatchTensorBuilder` | `main/src/infer_workflow.cpp` | 校验输入 shape/dtype，并把 patch 构造成 Host FP32 tensor |
 | `PatchInferenceRunner` | `main/src/infer_workflow.cpp` | 封装 `session.forward -> waitForReady -> host copy -> device.reset(1)` |
+| `MiniMapContext` | `main/src/infer_workflow.cpp` | 承载整张 SAR 缩略图、小地图红框映射和蛇形扫描路径 |
+| `UiRenderContext` | `main/src/infer_workflow.cpp` | 承载模式、输出信息和最终 UI 合成需要的上下文 |
 | `IFrameSink` | `main/src/infer_workflow.cpp` | 最终输出抽象接口 |
 | `PngFrameSink` | `main/src/infer_workflow.cpp` | 写 `io/output/<stem>/patch_*.png` |
 | `HdmiFrameSink` | `main/src/infer_workflow.cpp` | 把最终帧送到 HDMI |
 | `RGB565HDMIDisplay` | `main/include/infer_workflow_hdmi_display.hpp` | 分配 UDMA buffer 并驱动板端显示 |
 | `RadarConfig` | `main/src/rd_imaging_stream.cpp`, `main/src/infer_workflow.cpp` | RD 参数常量集合 |
 | `PatchInfo` / `PatchPacket` | `main/src/infer_workflow.cpp` | patch 元数据与 patch 数据承载 |
-| `RuntimeState` | `main/src/infer_workflow.cpp` | 日志与统计上下文 |
+| `RuntimeState` | `main/src/infer_workflow.cpp` | patch / frame 计数、FPS、infer/total ms 等推理阶段运行时上下文 |
 
 ---
 
@@ -119,8 +122,8 @@ echo.bin
  -> FP32 NHWC tensor
  -> session.forward
  -> restore output + seg logits
- -> 灰度恢复图 + 彩色 mask
- -> 左右并排 frame
+ -> 灰度恢复图 + 彩色 mask + UI 元数据
+ -> 完整 UI frame
  -> HDMI 或 PNG
 ```
 
@@ -136,7 +139,7 @@ echo.bin
 | model input | `FP32` | `1 x 512 x 512 x 1` |
 | restore output | `FP32` | `1 x 512 x 512 x 1` |
 | seg logits | `FP32` | `1 x 512 x 512 x 6` |
-| final frame | `CV_8UC3` | side-by-side output frame |
+| final frame | `CV_8UC3` | industrial UI frame shared by HDMI and PNG |
 | HDMI buffer | RGB565 bytes | `width * height * 2` |
 
 ---
@@ -150,6 +153,7 @@ echo.bin
 - 没有项目级 patch worker
 - 没有 RD / infer 并行流水线
 - 没有显式锁、条件变量或任务队列
+- 第一阶段 HDMI UI 的批准方向是：保持单线程，在单 patch 推理完成后合成最终 UI 帧
 
 ### 5.2 Inference lifecycle
 
@@ -167,13 +171,15 @@ workflow::infer::Run
  |- for each SAR
  |   |- loadSarImageNorm
  |   |- SnakePatchSource
- |   `- for each patch
- |       |- build input tensor
- |       |- session.forward
- |       |- waitForReady
- |       |- host copy outputs
- |       `- device.reset(1)
- `- Device::Close
+|   `- for each patch
+|       |- build input tensor
+|       |- session.forward
+|       |- waitForReady
+|       |- host copy outputs
+|       |- build mini-map / telemetry context
+|       |- compose industrial UI frame
+|       `- device.reset(1)
+`- Device::Close
 ```
 
 ### 5.3 RD lifecycle
@@ -222,7 +228,8 @@ workflow::rd::Run
 - `PatchTensorBuilder::build`
 - `PatchInferenceRunner::forward`
 - `logitsToMaskBgr`
-- `composeSideBySide`
+- `buildMiniMapContext`
+- `composeIndustrialUiFrame`
 - `HdmiFrameSink::write`
 
 ---
@@ -231,6 +238,7 @@ workflow::rd::Run
 
 - `main/src/infer_workflow.cpp` 仍然较大，当前是“单入口收口 + 模块命名空间化 + 配置/共享能力抽取”，不是彻底碎片化重写
 - `PatchInferenceRunner` 的 `waitForReady()` 与 `device.reset(1)` 顺序具有隐式设备约束
+- 第一阶段 HDMI UI 已确定不采用 UI/推理双线程，后续若改变该决策必须重新审查生命周期
 - `pipeline.patch.patch_size` 虽来自 YAML，但当前实现仍只接受 `512`
 - `ManualFlightPatchSource` 仍未接控制端，后续接线时需要重新校对文档
 - 本机是 Windows，无法通过 `main/CMakeLists.txt` 做完整 configure/build 验证

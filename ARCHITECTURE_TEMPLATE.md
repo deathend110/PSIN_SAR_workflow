@@ -51,7 +51,7 @@
 | RD config | `main/include/workflow/rd/rd_config.hpp`, `main/src/rd_config.cpp` | 解析 `configs/rd_imaging.yaml` |
 | RD workflow | `main/include/workflow/rd/rd_workflow.hpp`, `main/src/rd_imaging_stream.cpp` | 收集 echo、校验、成像、写 SAR、管理 scratch |
 | Infer config | `main/include/workflow/infer/infer_config.hpp`, `main/src/infer_config.cpp` | 解析 `configs/infer_workflow.yaml` |
-| Infer workflow | `main/include/workflow/infer/infer_workflow.hpp`, `main/src/infer_workflow.cpp` | 收集 SAR、切 patch、构建 tensor、跑 session、后处理、输出 |
+| Infer workflow | `main/include/workflow/infer/infer_workflow.hpp`, `main/src/infer_workflow.cpp` | 收集 SAR、切 patch、构建 tensor、跑 session、后处理、合成工业风 UI 帧、输出 |
 | HDMI adapter | `main/include/infer_workflow_hdmi_display.hpp` | RGB565 UDMA buffer 与 HDMI 显示适配 |
 
 模块边界原则：
@@ -100,7 +100,8 @@ io/sar_img/*.png
  -> PatchTensorBuilder
  -> session.forward
  -> restore gray + seg logits
- -> logitsToMaskBgr / composeSideBySide
+ -> build mini-map / telemetry context
+ -> compose final industrial UI frame
  -> HDMI or io/output/<stem>/patch_*.png
 ```
 
@@ -139,12 +140,17 @@ io/sar_img/*.png
 
 ## 6. Thread Model
 
+Phase 1 note:
+- HDMI UI stays single-threaded.
+- Each patch still follows `forward -> waitForReady -> host copy -> device.reset(1)`.
+- The final UI frame is composed after inference and then shared by both HDMI and PNG sinks.
+
 当前仍然是单主线程串行模型：
 
 - `workflow::rd::Run(...)`
   - 主线程负责读取配置、遍历 echo、执行成像、落盘、清理 scratch
 - `workflow::infer::Run(...)`
-  - 主线程负责设备打开、session 初始化、遍历 SAR、推理、后处理、输出
+  - 主线程负责设备打开、session 初始化、遍历 SAR、推理、UI 合成、输出
 
 当前没有项目级：
 
@@ -157,6 +163,8 @@ io/sar_img/*.png
 结论：
 
 - 当前最重要的时序风险不是 C++ 级多线程，而是设备/session 的使用顺序和资源生命周期
+- 第一阶段 HDMI UI 已批准继续保持单线程：`单 patch 推理完成后，再把结果嵌入 UI 并输出`
+- 第一阶段不引入 UI 线程、patch worker 线程或 queue 化显示流水
 
 ---
 
@@ -226,7 +234,8 @@ RD 模块：
 - `session.forward`
 - host output copy
 - argmax / colorize
-- compose side-by-side
+- build mini-map / telemetry context
+- compose final industrial UI frame
 - HDMI 时的 `BGR -> BGR565`
 
 本次重构目标不是额外性能优化，因此：
@@ -238,6 +247,11 @@ RD 模块：
 ---
 
 ## 10. Invariants / Do-not-break Rules
+
+Phase 1 UI invariants:
+- `output.mode=hdmi` and `output.mode=png` must share the same composed UI frame.
+- Telemetry only shows inference-stage metrics such as `FPS / infer ms / total ms`.
+- The overlay must not fabricate or display RD imaging time in `Inference only`.
 
 最关键的不可破坏约束：
 
@@ -253,6 +267,7 @@ RD 模块：
   - `stride=256`
   - `auto_snake`
 - 边缘不足完整 patch 直接丢弃
+- 第一阶段 HDMI UI 保持单线程后合成，不引入 UI/推理双线程
 - HDMI 继续沿用现有 `infer_workflow_hdmi_display.hpp`
 - `ManualFlightPatchSource` 只保留为预留扩展点，不接控制端
 
@@ -271,4 +286,5 @@ RD 模块：
 
 - 未验证前就恢复单进程 RD+Inference 串联
 - 在没有队列设计前引入 patch 并行
+- 在没有重新审查设备生命周期前引入 UI/推理双线程
 - 改动 `device.reset(1)`、session 生命周期或 HDMI buffer 语义

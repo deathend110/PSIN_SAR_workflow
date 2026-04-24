@@ -16,6 +16,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <cmath>
@@ -108,13 +109,35 @@ namespace workflow::infer
 
         struct RuntimeState
         {
-            std::string echo_stem;
-            int echo_index = 0;
-            int echo_count = 0;
+            std::string sar_stem;
+            int sar_index = 0;
+            int sar_count = 0;
+            int patch_count = 0;
+            int frame_index = 0;
             PatchInfo patch;
-            double rd_ms = 0.0;
+            double fps = 0.0;
             double infer_ms = 0.0;
             double total_ms = 0.0;
+        };
+
+        struct MiniMapContext
+        {
+            cv::Mat sar_preview_bgr;
+            std::vector<cv::Point2f> snake_centers;
+            int source_width = 0;
+            int source_height = 0;
+            int patch_size = 0;
+        };
+
+        struct UiRenderContext
+        {
+            std::string project_title = "PSIN WORKFLOW";
+            std::string status_label = "RUNNING";
+            std::string mode_label = "INFERENCE ONLY";
+            std::string output_label;
+            std::string restore_label = "GRAY OUTPUT";
+            std::string seg_label = "RGB MASK / 6 CLASS";
+            MiniMapContext mini_map;
         };
     }
 
@@ -813,32 +836,778 @@ namespace workflow::infer
         return mask_bgr;
     }
 
-    cv::Mat composeSideBySide(const cv::Mat &left_bgr, const cv::Mat &right_bgr, int width, int height)
+    std::string truncateToWidth(const std::string &text,
+                                int max_width,
+                                int font_face,
+                                double font_scale,
+                                int thickness)
     {
-        cv::Mat canvas(height, width, CV_8UC3, cv::Scalar(0, 0, 0));
-        const int left_width = width / 2;
-        const cv::Rect left_slot(0, 0, left_width, height);
-        const cv::Rect right_slot(left_width, 0, width - left_width, height);
+        if (text.empty() || max_width <= 0)
+        {
+            return std::string();
+        }
+        if (cv::getTextSize(text, font_face, font_scale, thickness, nullptr).width <= max_width)
+        {
+            return text;
+        }
 
-        const auto blitCentered = [](const cv::Mat &src, cv::Mat &dst, const cv::Rect &slot) {
-            if (src.empty())
+        static const std::string ellipsis = "...";
+        if (cv::getTextSize(ellipsis, font_face, font_scale, thickness, nullptr).width > max_width)
+        {
+            return ellipsis;
+        }
+
+        std::string trimmed = text;
+        while (!trimmed.empty())
+        {
+            trimmed.pop_back();
+            const std::string candidate = trimmed + ellipsis;
+            if (cv::getTextSize(candidate, font_face, font_scale, thickness, nullptr).width <= max_width)
             {
-                return;
+                return candidate;
             }
-            const double scale = std::min(static_cast<double>(slot.width) / src.cols,
-                                          static_cast<double>(slot.height) / src.rows);
-            const int resized_w = std::max(1, static_cast<int>(std::round(src.cols * scale)));
-            const int resized_h = std::max(1, static_cast<int>(std::round(src.rows * scale)));
-            cv::Mat resized;
-            cv::resize(src, resized, cv::Size(resized_w, resized_h), 0.0, 0.0, cv::INTER_NEAREST);
-            const int x = slot.x + (slot.width - resized_w) / 2;
-            const int y = slot.y + (slot.height - resized_h) / 2;
-            resized.copyTo(dst(cv::Rect(x, y, resized_w, resized_h)));
+        }
+        return ellipsis;
+    }
+
+    cv::Rect insetRect(const cv::Rect &rect, int dx, int dy)
+    {
+        const int width = std::max(1, rect.width - 2 * dx);
+        const int height = std::max(1, rect.height - 2 * dy);
+        return cv::Rect(rect.x + dx, rect.y + dy, width, height);
+    }
+
+    void drawGridTexture(cv::Mat &canvas, const cv::Rect &rect, int step, const cv::Scalar &color)
+    {
+        if (step <= 0)
+        {
+            return;
+        }
+        for (int x = rect.x; x <= rect.x + rect.width; x += step)
+        {
+            cv::line(canvas, cv::Point(x, rect.y), cv::Point(x, rect.y + rect.height), color, 1, cv::LINE_AA);
+        }
+        for (int y = rect.y; y <= rect.y + rect.height; y += step)
+        {
+            cv::line(canvas, cv::Point(rect.x, y), cv::Point(rect.x + rect.width, y), color, 1, cv::LINE_AA);
+        }
+    }
+
+    cv::Rect drawPanel(cv::Mat &canvas,
+                       const cv::Rect &rect,
+                       const std::string &title,
+                       const std::string &subtitle,
+                       int header_height,
+                       const cv::Scalar &panel_color,
+                       const cv::Scalar &header_color,
+                       const cv::Scalar &border_color,
+                       const cv::Scalar &title_color,
+                       const cv::Scalar &subtitle_color)
+    {
+        cv::rectangle(canvas, rect, panel_color, cv::FILLED);
+        cv::rectangle(canvas, rect, border_color, 1, cv::LINE_AA);
+        const cv::Rect header_rect(rect.x, rect.y, rect.width, std::min(rect.height, header_height));
+        cv::rectangle(canvas, header_rect, header_color, cv::FILLED);
+        cv::line(canvas,
+                 cv::Point(rect.x, header_rect.br().y),
+                 cv::Point(rect.x + rect.width, header_rect.br().y),
+                 border_color,
+                 1,
+                 cv::LINE_AA);
+
+        const int pad = std::max(8, header_height / 4);
+        const int font_face = cv::FONT_HERSHEY_SIMPLEX;
+        const double title_scale = std::max(0.45, header_height / 38.0);
+        const double subtitle_scale = std::max(0.35, header_height / 52.0);
+        const int title_thickness = std::max(1, header_height / 20);
+        const int subtitle_thickness = std::max(1, title_thickness - 1);
+
+        const std::string clipped_title = truncateToWidth(title, rect.width - 2 * pad, font_face, title_scale, title_thickness);
+        const std::string clipped_subtitle = truncateToWidth(subtitle, rect.width - 2 * pad, font_face, subtitle_scale, subtitle_thickness);
+        cv::putText(canvas,
+                    clipped_title,
+                    cv::Point(rect.x + pad, rect.y + pad + header_height / 2),
+                    font_face,
+                    title_scale,
+                    title_color,
+                    title_thickness,
+                    cv::LINE_AA);
+        cv::putText(canvas,
+                    clipped_subtitle,
+                    cv::Point(rect.x + rect.width - pad - cv::getTextSize(clipped_subtitle, font_face, subtitle_scale, subtitle_thickness, nullptr).width,
+                              rect.y + pad + header_height / 2),
+                    font_face,
+                    subtitle_scale,
+                    subtitle_color,
+                    subtitle_thickness,
+                    cv::LINE_AA);
+        return insetRect(cv::Rect(rect.x, rect.y + header_rect.height, rect.width, rect.height - header_rect.height),
+                         std::max(8, rect.width / 40),
+                         std::max(8, rect.height / 40));
+    }
+
+    cv::Rect fitImageRect(const cv::Size &src_size, const cv::Rect &slot)
+    {
+        if (src_size.width <= 0 || src_size.height <= 0 || slot.width <= 0 || slot.height <= 0)
+        {
+            return cv::Rect(slot.x, slot.y, 1, 1);
+        }
+        const double scale = std::min(static_cast<double>(slot.width) / src_size.width,
+                                      static_cast<double>(slot.height) / src_size.height);
+        const int width = std::max(1, static_cast<int>(std::round(src_size.width * scale)));
+        const int height = std::max(1, static_cast<int>(std::round(src_size.height * scale)));
+        const int x = slot.x + (slot.width - width) / 2;
+        const int y = slot.y + (slot.height - height) / 2;
+        return cv::Rect(x, y, width, height);
+    }
+
+    cv::Rect drawFittedImage(const cv::Mat &src, cv::Mat &dst, const cv::Rect &slot, int interpolation)
+    {
+        if (src.empty())
+        {
+            return cv::Rect(slot.x, slot.y, 1, 1);
+        }
+        const cv::Rect target = fitImageRect(src.size(), slot);
+        cv::Mat resized;
+        cv::resize(src, resized, target.size(), 0.0, 0.0, interpolation);
+        resized.copyTo(dst(target));
+        return target;
+    }
+
+    cv::Mat normalizedSarToBgr(const cv::Mat &sar_norm)
+    {
+        cv::Mat sar_u8;
+        sar_norm.convertTo(sar_u8, CV_8UC1, 255.0);
+        cv::Mat sar_bgr;
+        cv::cvtColor(sar_u8, sar_bgr, cv::COLOR_GRAY2BGR);
+        return sar_bgr;
+    }
+
+    std::vector<cv::Point2f> buildSnakeCenters(int rows, int cols, int stride, int patch_size)
+    {
+        std::vector<cv::Point2f> centers;
+        centers.reserve(std::max(0, rows * cols));
+        for (int row = 0; row < rows; ++row)
+        {
+            const bool right_to_left = (row % 2) == 1;
+            for (int order = 0; order < cols; ++order)
+            {
+                const int col = right_to_left ? (cols - 1 - order) : order;
+                const float x = static_cast<float>(col * stride + patch_size / 2);
+                const float y = static_cast<float>(row * stride + patch_size / 2);
+                centers.emplace_back(x, y);
+            }
+        }
+        return centers;
+    }
+
+    MiniMapContext buildMiniMapContext(const cv::Mat &sar_norm, int patch_size, int stride, int rows, int cols)
+    {
+        MiniMapContext context;
+        context.sar_preview_bgr = normalizedSarToBgr(sar_norm);
+        context.snake_centers = buildSnakeCenters(rows, cols, stride, patch_size);
+        context.source_width = sar_norm.cols;
+        context.source_height = sar_norm.rows;
+        context.patch_size = patch_size;
+        return context;
+    }
+
+    std::string formatCounter(int current, int total)
+    {
+        if (total > 0)
+        {
+            return std::to_string(current) + "/" + std::to_string(total);
+        }
+        return std::to_string(current);
+    }
+
+    std::string formatFrameCounter(int current)
+    {
+        return std::string("#") + std::to_string(current);
+    }
+
+    std::string formatMillis(double value)
+    {
+        std::ostringstream oss;
+        oss.setf(std::ios::fixed);
+        oss.precision(2);
+        oss << value << " ms";
+        return oss.str();
+    }
+
+    std::string formatFps(double value)
+    {
+        std::ostringstream oss;
+        oss.setf(std::ios::fixed);
+        oss.precision(1);
+        oss << value;
+        return oss.str();
+    }
+
+    void drawDashedLine(cv::Mat &canvas,
+                        const cv::Point &start,
+                        const cv::Point &end,
+                        const cv::Scalar &color,
+                        int thickness,
+                        int dash_length,
+                        int gap_length)
+    {
+        const cv::Point2f delta = cv::Point2f(static_cast<float>(end.x - start.x),
+                                              static_cast<float>(end.y - start.y));
+        const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y);
+        if (length < 1.0f)
+        {
+            return;
+        }
+
+        const cv::Point2f direction(delta.x / length, delta.y / length);
+        float cursor = 0.0f;
+        while (cursor < length)
+        {
+            const float segment_end = std::min(length, cursor + static_cast<float>(dash_length));
+            const cv::Point segment_start(static_cast<int>(std::round(start.x + direction.x * cursor)),
+                                          static_cast<int>(std::round(start.y + direction.y * cursor)));
+            const cv::Point segment_finish(static_cast<int>(std::round(start.x + direction.x * segment_end)),
+                                           static_cast<int>(std::round(start.y + direction.y * segment_end)));
+            cv::line(canvas, segment_start, segment_finish, color, thickness, cv::LINE_AA);
+            cursor += static_cast<float>(dash_length + gap_length);
+        }
+    }
+
+    cv::Point mapPointToRect(const cv::Point2f &point, const MiniMapContext &context, const cv::Rect &target_rect)
+    {
+        const double x_ratio = context.source_width > 0 ? point.x / static_cast<double>(context.source_width) : 0.0;
+        const double y_ratio = context.source_height > 0 ? point.y / static_cast<double>(context.source_height) : 0.0;
+        const int x = target_rect.x + static_cast<int>(std::round(x_ratio * target_rect.width));
+        const int y = target_rect.y + static_cast<int>(std::round(y_ratio * target_rect.height));
+        return cv::Point(x, y);
+    }
+
+    void drawMetricRows(cv::Mat &canvas,
+                        const cv::Rect &body_rect,
+                        const std::vector<std::pair<std::string, std::string>> &metrics,
+                        const cv::Scalar &label_color,
+                        const cv::Scalar &value_color,
+                        const cv::Scalar &rule_color)
+    {
+        if (metrics.empty())
+        {
+            return;
+        }
+
+        const int font_face = cv::FONT_HERSHEY_SIMPLEX;
+        const double font_scale = std::max(0.36, body_rect.height / 780.0);
+        const int thickness = std::max(1, body_rect.height / 220);
+        const int row_height = std::max(20, body_rect.height / static_cast<int>(metrics.size() + 1));
+        const int label_width = static_cast<int>(body_rect.width * 0.46);
+
+        int y = body_rect.y + row_height / 2;
+        for (const auto &[label, value] : metrics)
+        {
+            if (y + row_height / 2 > body_rect.br().y)
+            {
+                break;
+            }
+            cv::line(canvas,
+                     cv::Point(body_rect.x, y + row_height / 2),
+                     cv::Point(body_rect.x + body_rect.width, y + row_height / 2),
+                     rule_color,
+                     1,
+                     cv::LINE_AA);
+
+            const std::string clipped_label = truncateToWidth(label, label_width, font_face, font_scale, thickness);
+            const std::string clipped_value = truncateToWidth(value,
+                                                              body_rect.width - label_width - 6,
+                                                              font_face,
+                                                              font_scale,
+                                                              thickness);
+
+            cv::putText(canvas,
+                        clipped_label,
+                        cv::Point(body_rect.x, y),
+                        font_face,
+                        font_scale,
+                        label_color,
+                        thickness,
+                        cv::LINE_AA);
+            const int value_width = cv::getTextSize(clipped_value, font_face, font_scale, thickness, nullptr).width;
+            cv::putText(canvas,
+                        clipped_value,
+                        cv::Point(body_rect.x + body_rect.width - value_width, y),
+                        font_face,
+                        font_scale,
+                        value_color,
+                        thickness,
+                        cv::LINE_AA);
+            y += row_height;
+        }
+    }
+
+    void drawMiniMap(cv::Mat &canvas,
+                     const cv::Rect &body_rect,
+                     const MiniMapContext &context,
+                     const PatchInfo &patch,
+                     const cv::Scalar &accent_color,
+                     const cv::Scalar &patch_color,
+                     const cv::Scalar &border_color)
+    {
+        cv::rectangle(canvas, body_rect, cv::Scalar(231, 236, 242), cv::FILLED);
+        cv::rectangle(canvas, body_rect, border_color, 1, cv::LINE_AA);
+        drawGridTexture(canvas, body_rect, std::max(14, body_rect.width / 12), cv::Scalar(248, 250, 252));
+
+        const cv::Rect image_rect = drawFittedImage(context.sar_preview_bgr, canvas, insetRect(body_rect, 8, 8), cv::INTER_LINEAR);
+        for (size_t i = 1; i < context.snake_centers.size(); ++i)
+        {
+            drawDashedLine(canvas,
+                           mapPointToRect(context.snake_centers[i - 1], context, image_rect),
+                           mapPointToRect(context.snake_centers[i], context, image_rect),
+                           accent_color,
+                           std::max(1, body_rect.width / 160),
+                           std::max(5, body_rect.width / 42),
+                           std::max(4, body_rect.width / 52));
+        }
+
+        const double scale_x = context.source_width > 0 ? static_cast<double>(image_rect.width) / context.source_width : 1.0;
+        const double scale_y = context.source_height > 0 ? static_cast<double>(image_rect.height) / context.source_height : 1.0;
+        const cv::Rect patch_rect(image_rect.x + static_cast<int>(std::round(patch.x * scale_x)),
+                                  image_rect.y + static_cast<int>(std::round(patch.y * scale_y)),
+                                  std::max(1, static_cast<int>(std::round(patch.width * scale_x))),
+                                  std::max(1, static_cast<int>(std::round(patch.height * scale_y))));
+        cv::rectangle(canvas, patch_rect, patch_color, std::max(2, body_rect.width / 110), cv::LINE_AA);
+
+        const cv::Point current_center = mapPointToRect(cv::Point2f(static_cast<float>(patch.x + patch.width / 2),
+                                                                    static_cast<float>(patch.y + patch.height / 2)),
+                                                        context,
+                                                        image_rect);
+        cv::circle(canvas, current_center, std::max(3, body_rect.width / 70), patch_color, cv::FILLED, cv::LINE_AA);
+        cv::circle(canvas, current_center, std::max(5, body_rect.width / 50), cv::Scalar(190, 24, 24), 1, cv::LINE_AA);
+
+        const std::string center_label = "CENTER " + std::to_string(patch.x + patch.width / 2) + ", " +
+                                         std::to_string(patch.y + patch.height / 2);
+        const int footer_height = std::max(24, body_rect.height / 8);
+        const cv::Rect footer_rect(body_rect.x + 8, body_rect.br().y - footer_height - 8, body_rect.width - 16, footer_height);
+        cv::rectangle(canvas, footer_rect, cv::Scalar(238, 242, 246), cv::FILLED);
+        cv::rectangle(canvas, footer_rect, border_color, 1, cv::LINE_AA);
+        const int font_face = cv::FONT_HERSHEY_SIMPLEX;
+        const double font_scale = std::max(0.32, footer_height / 56.0);
+        const int thickness = std::max(1, footer_height / 18);
+        const std::string clipped_center = truncateToWidth(center_label, footer_rect.width - 12, font_face, font_scale, thickness);
+        cv::putText(canvas,
+                    clipped_center,
+                    cv::Point(footer_rect.x + 6, footer_rect.y + footer_rect.height / 2 + footer_height / 8),
+                    font_face,
+                    font_scale,
+                    cv::Scalar(51, 65, 85),
+                    thickness,
+                    cv::LINE_AA);
+    }
+
+    void drawLegend(cv::Mat &canvas, const cv::Rect &panel_rect)
+    {
+        static const std::array<const char *, SEG_CLASSES> names = {
+            "Water",
+            "Vegetation",
+            "Bareland",
+            "Road",
+            "Building",
+            "Mountain"};
+
+        cv::rectangle(canvas, panel_rect, cv::Scalar(238, 242, 246), cv::FILLED);
+        cv::rectangle(canvas, panel_rect, cv::Scalar(151, 163, 175), 1, cv::LINE_AA);
+
+        const int font_face = cv::FONT_HERSHEY_SIMPLEX;
+        const double title_scale = std::max(0.34, panel_rect.height / 140.0);
+        const double row_scale = std::max(0.3, panel_rect.height / 170.0);
+        const int title_thickness = std::max(1, panel_rect.height / 70);
+        const int row_thickness = std::max(1, title_thickness - 1);
+        const int pad = std::max(8, panel_rect.width / 18);
+        cv::putText(canvas,
+                    "LEGEND",
+                    cv::Point(panel_rect.x + pad, panel_rect.y + pad + panel_rect.height / 10),
+                    font_face,
+                    title_scale,
+                    cv::Scalar(15, 23, 42),
+                    title_thickness,
+                    cv::LINE_AA);
+
+        const int columns = 2;
+        const int cell_width = std::max(1, (panel_rect.width - pad * 2) / columns);
+        const int cell_height = std::max(18, (panel_rect.height - pad * 2 - panel_rect.height / 5) / 3);
+        for (int cls = 0; cls < SEG_CLASSES; ++cls)
+        {
+            const int col = cls % columns;
+            const int row = cls / columns;
+            const int x = panel_rect.x + pad + col * cell_width;
+            const int y = panel_rect.y + pad + panel_rect.height / 5 + row * cell_height;
+            const cv::Rect color_rect(x, y, std::max(10, panel_rect.width / 22), std::max(10, panel_rect.height / 10));
+            cv::rectangle(canvas, color_rect, classColorBgr(cls), cv::FILLED);
+            cv::rectangle(canvas, color_rect, cv::Scalar(0, 0, 0), 1, cv::LINE_AA);
+            const std::string clipped_name = truncateToWidth(names[cls],
+                                                             cell_width - color_rect.width - 10,
+                                                             font_face,
+                                                             row_scale,
+                                                             row_thickness);
+            cv::putText(canvas,
+                        clipped_name,
+                        cv::Point(color_rect.br().x + 6, y + color_rect.height - 1),
+                        font_face,
+                        row_scale,
+                        cv::Scalar(31, 41, 55),
+                        row_thickness,
+                        cv::LINE_AA);
+        }
+    }
+
+    cv::Mat composeIndustrialUiFrame(const UiRenderContext &ui_context,
+                                     const RuntimeState &state,
+                                     const cv::Mat &restore_bgr,
+                                     const cv::Mat &mask_bgr,
+                                     int width,
+                                     int height)
+    {
+        const cv::Scalar shell_bg(42, 47, 53);
+        const cv::Scalar frame_bg(115, 122, 132);
+        const cv::Scalar panel_bg(238, 242, 246);
+        const cv::Scalar header_bg(214, 219, 226);
+        const cv::Scalar border_color(154, 163, 175);
+        const cv::Scalar title_color(15, 23, 42);
+        const cv::Scalar subtitle_color(71, 85, 105);
+        const cv::Scalar accent_color(125, 211, 252);
+        const cv::Scalar success_color(34, 197, 94);
+        const cv::Scalar patch_color(239, 68, 68);
+
+        cv::Mat canvas(height, width, CV_8UC3, shell_bg);
+        const int margin = std::max(10, std::min(width, height) / 48);
+        const int gap = std::max(10, std::min(width, height) / 54);
+        const int header_height = std::max(68, height / 11);
+        const int footer_height = std::max(42, height / 19);
+        const cv::Rect shell_rect(margin, margin, width - margin * 2, height - margin * 2);
+
+        cv::rectangle(canvas, shell_rect, frame_bg, cv::FILLED);
+        cv::rectangle(canvas, shell_rect, cv::Scalar(95, 103, 114), std::max(2, margin / 4), cv::LINE_AA);
+        drawGridTexture(canvas, insetRect(shell_rect, 2, 2), std::max(18, width / 72), cv::Scalar(130, 138, 148));
+
+        const cv::Rect header_rect(shell_rect.x, shell_rect.y, shell_rect.width, std::min(header_height, shell_rect.height));
+        cv::rectangle(canvas, header_rect, header_bg, cv::FILLED);
+        cv::rectangle(canvas, header_rect, border_color, 1, cv::LINE_AA);
+
+        const int header_pad = std::max(12, width / 96);
+        const int font_face = cv::FONT_HERSHEY_SIMPLEX;
+        const double eyebrow_scale = std::max(0.4, header_height / 74.0);
+        const double title_scale = std::max(0.75, header_height / 44.0);
+        const int eyebrow_thickness = std::max(1, header_height / 28);
+        const int title_thickness = std::max(1, header_height / 18);
+        const int badge_height = std::max(30, header_height / 2);
+        const int badge_gap = std::max(8, header_pad / 2);
+        const int badge_width = std::max(120, shell_rect.width / 8);
+        const int logo_size = std::max(36, header_height / 2);
+
+        const cv::Rect logo_rect(header_rect.x + header_pad, header_rect.y + (header_rect.height - logo_size) / 2, logo_size, logo_size);
+        cv::rectangle(canvas, logo_rect, cv::Scalar(246, 248, 251), cv::FILLED);
+        cv::rectangle(canvas, logo_rect, cv::Scalar(89, 98, 112), 1, cv::LINE_AA);
+        cv::putText(canvas,
+                    "SAR",
+                    cv::Point(logo_rect.x + logo_size / 6, logo_rect.y + logo_rect.height / 2 + logo_size / 8),
+                    font_face,
+                    std::max(0.45, logo_size / 56.0),
+                    cv::Scalar(55, 65, 81),
+                    std::max(1, logo_size / 18),
+                    cv::LINE_AA);
+
+        const int title_x = header_rect.x + header_pad * 2 + logo_size;
+        cv::putText(canvas,
+                    "EDGE AI CONTROL TERMINAL",
+                    cv::Point(title_x, header_rect.y + header_pad + header_rect.height / 4),
+                    font_face,
+                    eyebrow_scale,
+                    subtitle_color,
+                    eyebrow_thickness,
+                    cv::LINE_AA);
+        cv::putText(canvas,
+                    truncateToWidth(ui_context.project_title, header_rect.width / 2, font_face, title_scale, title_thickness),
+                    cv::Point(title_x, header_rect.y + header_rect.height - header_pad - header_rect.height / 6),
+                    font_face,
+                    title_scale,
+                    title_color,
+                    title_thickness,
+                    cv::LINE_AA);
+
+        auto drawBadge = [&](int x, const std::string &label, const cv::Scalar &text_color, bool with_dot) {
+            const cv::Rect badge_rect(x, header_rect.y + (header_rect.height - badge_height) / 2, badge_width, badge_height);
+            cv::rectangle(canvas, badge_rect, cv::Scalar(246, 248, 251), cv::FILLED);
+            cv::rectangle(canvas, badge_rect, border_color, 1, cv::LINE_AA);
+            int text_x = badge_rect.x + 10;
+            if (with_dot)
+            {
+                cv::circle(canvas,
+                           cv::Point(badge_rect.x + 14, badge_rect.y + badge_rect.height / 2),
+                           std::max(3, badge_rect.height / 9),
+                           success_color,
+                           cv::FILLED,
+                           cv::LINE_AA);
+                text_x = badge_rect.x + 28;
+            }
+            cv::putText(canvas,
+                        truncateToWidth(label, badge_rect.width - (text_x - badge_rect.x) - 8, font_face, 0.5, 1),
+                        cv::Point(text_x, badge_rect.y + badge_rect.height / 2 + badge_rect.height / 8),
+                        font_face,
+                        0.5,
+                        text_color,
+                        1,
+                        cv::LINE_AA);
         };
 
-        blitCentered(left_bgr, canvas, left_slot);
-        blitCentered(right_bgr, canvas, right_slot);
+        int badge_x = header_rect.br().x - header_pad - badge_width;
+        drawBadge(badge_x, ui_context.output_label, cv::Scalar(51, 65, 85), false);
+        badge_x -= badge_gap + badge_width;
+        drawBadge(badge_x, "MODE / " + ui_context.mode_label, cv::Scalar(51, 65, 85), false);
+        badge_x -= badge_gap + badge_width;
+        drawBadge(badge_x, ui_context.status_label, cv::Scalar(22, 101, 52), true);
+
+        const int content_top = header_rect.br().y + gap;
+        const int content_bottom = shell_rect.br().y - footer_height - gap;
+        const int content_height = std::max(1, content_bottom - content_top);
+        const int left_width = std::max(260, shell_rect.width / 5);
+        const cv::Rect left_column(shell_rect.x, content_top, left_width, content_height);
+        const cv::Rect main_column(left_column.br().x + gap,
+                                   content_top,
+                                   shell_rect.br().x - (left_column.br().x + gap),
+                                   content_height);
+
+        const int panel_header = std::max(40, height / 25);
+        const int left_map_height = std::max(180, content_height * 2 / 5);
+        const cv::Rect map_panel(left_column.x, left_column.y, left_column.width, left_map_height);
+        const cv::Rect telemetry_panel(left_column.x,
+                                       map_panel.br().y + gap,
+                                       left_column.width,
+                                       std::max(1, left_column.br().y - (map_panel.br().y + gap)));
+        const cv::Rect map_body = drawPanel(canvas,
+                                            map_panel,
+                                            "GLOBAL MAP",
+                                            "SCENE LOCATOR",
+                                            panel_header,
+                                            panel_bg,
+                                            header_bg,
+                                            border_color,
+                                            title_color,
+                                            subtitle_color);
+        drawMiniMap(canvas, map_body, ui_context.mini_map, state.patch, accent_color, patch_color, border_color);
+
+        const cv::Rect telemetry_body = drawPanel(canvas,
+                                                  telemetry_panel,
+                                                  "TELEMETRY",
+                                                  "RUNTIME MONITOR",
+                                                  panel_header,
+                                                  panel_bg,
+                                                  header_bg,
+                                                  border_color,
+                                                  title_color,
+                                                  subtitle_color);
+        // In inference-only mode each SAR image is the artifact produced from one upstream
+        // echo capture, so the echo and SAR counters intentionally stay aligned here.
+        const std::vector<std::pair<std::string, std::string>> metrics = {
+            {"SYSTEM", ui_context.status_label},
+            {"MODE", ui_context.mode_label},
+            {"ECHO", formatCounter(state.sar_index, state.sar_count)},
+            {"SAR", formatCounter(state.sar_index, state.sar_count)},
+            {"PATCH", formatCounter(state.patch.index + 1, state.patch_count)},
+            {"FRAME", formatFrameCounter(state.frame_index)},
+            {"SAR_NAME", state.sar_stem},
+            {"GRID_RC", std::to_string(state.patch.grid_row) + ", " + std::to_string(state.patch.grid_col)},
+            {"PATCH_XY", std::to_string(state.patch.x) + ", " + std::to_string(state.patch.y)},
+            {"FPS", formatFps(state.fps)},
+            {"NPU_MS", formatMillis(state.infer_ms)},
+            {"TOTAL_MS", formatMillis(state.total_ms)}};
+        drawMetricRows(canvas,
+                       telemetry_body,
+                       metrics,
+                       subtitle_color,
+                       title_color,
+                       cv::Scalar(200, 208, 217));
+
+        const int status_height = std::max(92, main_column.height / 6);
+        const cv::Rect status_panel(main_column.x, main_column.y, main_column.width, status_height);
+        const cv::Rect status_body = drawPanel(canvas,
+                                               status_panel,
+                                               "SYSTEM STRIP",
+                                               "PATCH SUMMARY",
+                                               panel_header,
+                                               panel_bg,
+                                               header_bg,
+                                               border_color,
+                                               title_color,
+                                               subtitle_color);
+
+        const int status_gap = std::max(8, status_body.width / 60);
+        const int cell_width = std::max(1, (status_body.width - status_gap * 2) / 3);
+        const std::array<cv::Rect, 3> status_cells = {
+            cv::Rect(status_body.x, status_body.y, cell_width, status_body.height),
+            cv::Rect(status_body.x + cell_width + status_gap, status_body.y, cell_width, status_body.height),
+            cv::Rect(status_body.x + (cell_width + status_gap) * 2, status_body.y, cell_width, status_body.height)};
+        const std::array<std::pair<std::string, std::string>, 3> status_items = {
+            std::make_pair(std::string("SYSTEM"), std::string("READY / LIVE")),
+            std::make_pair(std::string("PATCH CENTER"),
+                           std::to_string(state.patch.x + state.patch.width / 2) + ", " +
+                               std::to_string(state.patch.y + state.patch.height / 2)),
+            std::make_pair(std::string("PATCH RULE"),
+                           std::to_string(state.patch.width) + "x" + std::to_string(state.patch.height) +
+                               " / stride 256")};
+
+        for (size_t i = 0; i < status_cells.size(); ++i)
+        {
+            if (i > 0)
+            {
+                cv::line(canvas,
+                         cv::Point(status_cells[i].x - status_gap / 2, status_cells[i].y),
+                         cv::Point(status_cells[i].x - status_gap / 2, status_cells[i].br().y),
+                         border_color,
+                         1,
+                         cv::LINE_AA);
+            }
+            cv::putText(canvas,
+                        status_items[i].first,
+                        cv::Point(status_cells[i].x, status_cells[i].y + status_cells[i].height / 4),
+                        font_face,
+                        std::max(0.35, status_cells[i].height / 130.0),
+                        subtitle_color,
+                        1,
+                        cv::LINE_AA);
+            cv::putText(canvas,
+                        truncateToWidth(status_items[i].second,
+                                        status_cells[i].width - 8,
+                                        font_face,
+                                        std::max(0.52, status_cells[i].height / 72.0),
+                                        1),
+                        cv::Point(status_cells[i].x, status_cells[i].y + status_cells[i].height - status_cells[i].height / 5),
+                        font_face,
+                        std::max(0.52, status_cells[i].height / 72.0),
+                        title_color,
+                        1,
+                        cv::LINE_AA);
+        }
+
+        const cv::Rect views_area(main_column.x,
+                                  status_panel.br().y + gap,
+                                  main_column.width,
+                                  std::max(1, main_column.br().y - (status_panel.br().y + gap)));
+        const int view_gap = std::max(10, views_area.width / 60);
+        const int view_width = std::max(1, (views_area.width - view_gap) / 2);
+        const cv::Rect restore_panel(views_area.x, views_area.y, view_width, views_area.height);
+        const cv::Rect seg_panel(restore_panel.br().x + view_gap, views_area.y, view_width, views_area.height);
+
+        const cv::Rect restore_body = drawPanel(canvas,
+                                                restore_panel,
+                                                "RESTORED SAR WINDOW",
+                                                "NET / RESTORE",
+                                                panel_header,
+                                                panel_bg,
+                                                header_bg,
+                                                border_color,
+                                                title_color,
+                                                subtitle_color);
+        cv::rectangle(canvas, restore_body, cv::Scalar(237, 241, 245), cv::FILLED);
+        drawGridTexture(canvas, restore_body, std::max(18, restore_body.width / 18), cv::Scalar(255, 255, 255));
+        drawFittedImage(restore_bgr, canvas, insetRect(restore_body, 10, 10), cv::INTER_NEAREST);
+        const cv::Rect restore_badge(restore_body.x + 12, restore_body.y + 12, std::max(180, restore_body.width / 2), std::max(28, restore_body.height / 16));
+        cv::rectangle(canvas, restore_badge, cv::Scalar(238, 242, 246), cv::FILLED);
+        cv::rectangle(canvas, restore_badge, border_color, 1, cv::LINE_AA);
+        cv::putText(canvas,
+                    truncateToWidth("PATCH / " + state.sar_stem, restore_badge.width - 12, font_face, 0.42, 1),
+                    cv::Point(restore_badge.x + 6, restore_badge.y + restore_badge.height / 2 + restore_badge.height / 8),
+                    font_face,
+                    0.42,
+                    cv::Scalar(51, 65, 85),
+                    1,
+                    cv::LINE_AA);
+        const cv::Rect restore_footer(restore_body.br().x - std::max(120, restore_body.width / 4) - 12,
+                                      restore_body.br().y - std::max(28, restore_body.height / 16) - 12,
+                                      std::max(120, restore_body.width / 4),
+                                      std::max(28, restore_body.height / 16));
+        cv::rectangle(canvas, restore_footer, cv::Scalar(238, 242, 246), cv::FILLED);
+        cv::rectangle(canvas, restore_footer, border_color, 1, cv::LINE_AA);
+        cv::putText(canvas,
+                    ui_context.restore_label,
+                    cv::Point(restore_footer.x + 8, restore_footer.y + restore_footer.height / 2 + restore_footer.height / 8),
+                    font_face,
+                    0.42,
+                    cv::Scalar(51, 65, 85),
+                    1,
+                    cv::LINE_AA);
+
+        const cv::Rect seg_body = drawPanel(canvas,
+                                            seg_panel,
+                                            "SEGMENTATION RGB WINDOW",
+                                            "NET / SEGMENT",
+                                            panel_header,
+                                            panel_bg,
+                                            header_bg,
+                                            border_color,
+                                            title_color,
+                                            subtitle_color);
+        cv::rectangle(canvas, seg_body, cv::Scalar(221, 227, 234), cv::FILLED);
+        drawGridTexture(canvas, seg_body, std::max(18, seg_body.width / 18), cv::Scalar(245, 247, 250));
+        drawFittedImage(mask_bgr, canvas, insetRect(seg_body, 10, 10), cv::INTER_NEAREST);
+        const cv::Rect seg_badge(seg_body.x + 12, seg_body.y + 12, std::max(180, seg_body.width / 3), std::max(28, seg_body.height / 16));
+        cv::rectangle(canvas, seg_badge, cv::Scalar(238, 242, 246), cv::FILLED);
+        cv::rectangle(canvas, seg_badge, border_color, 1, cv::LINE_AA);
+        cv::putText(canvas,
+                    ui_context.seg_label,
+                    cv::Point(seg_badge.x + 6, seg_badge.y + seg_badge.height / 2 + seg_badge.height / 8),
+                    font_face,
+                    0.42,
+                    cv::Scalar(51, 65, 85),
+                    1,
+                    cv::LINE_AA);
+
+        const cv::Rect legend_panel(seg_body.br().x - std::max(220, seg_body.width / 3) - 12,
+                                    seg_body.br().y - std::max(126, seg_body.height / 4) - 12,
+                                    std::max(220, seg_body.width / 3),
+                                    std::max(126, seg_body.height / 4));
+        drawLegend(canvas, legend_panel);
+
+        const cv::Rect footer_rect(shell_rect.x, content_bottom + gap, shell_rect.width, footer_height);
+        cv::rectangle(canvas, footer_rect, panel_bg, cv::FILLED);
+        cv::rectangle(canvas, footer_rect, border_color, 1, cv::LINE_AA);
+        const double footer_scale = std::max(0.38, footer_rect.height / 70.0);
+        const std::string left_footer = truncateToWidth("AUTO_SNAKE / PATCH 512x512 / STRIDE 256",
+                                                        footer_rect.width / 2,
+                                                        font_face,
+                                                        footer_scale,
+                                                        1);
+        const std::string right_footer = truncateToWidth(ui_context.output_label,
+                                                         footer_rect.width / 2,
+                                                         font_face,
+                                                         footer_scale,
+                                                         1);
+        cv::putText(canvas,
+                    left_footer,
+                    cv::Point(footer_rect.x + header_pad, footer_rect.y + footer_rect.height / 2 + footer_rect.height / 8),
+                    font_face,
+                    footer_scale,
+                    cv::Scalar(51, 65, 85),
+                    1,
+                    cv::LINE_AA);
+        const int footer_width = cv::getTextSize(right_footer, font_face, footer_scale, 1, nullptr).width;
+        cv::putText(canvas,
+                    right_footer,
+                    cv::Point(footer_rect.br().x - header_pad - footer_width, footer_rect.y + footer_rect.height / 2 + footer_rect.height / 8),
+                    font_face,
+                    footer_scale,
+                    title_color,
+                    1,
+                    cv::LINE_AA);
+
         return canvas;
+    }
+
+    std::string buildOutputLabel(const AppConfig &cfg)
+    {
+        if (cfg.output_mode == "hdmi")
+        {
+            return "HDMI / " + std::to_string(cfg.display_width) + "x" + std::to_string(cfg.display_height) +
+                   "@" + std::to_string(cfg.display_fps);
+        }
+        return "PNG / " + cfg.output_dir.string();
     }
 
     class IFrameSink
@@ -859,11 +1628,11 @@ namespace workflow::infer
 
         void write(const RuntimeState &state, const cv::Mat &frame_bgr) override
         {
-            const auto echo_dir = output_dir_ / state.echo_stem;
-            fs::create_directories(echo_dir);
+            const auto sar_dir = output_dir_ / state.sar_stem;
+            fs::create_directories(sar_dir);
             char name[64] = {0};
             std::snprintf(name, sizeof(name), "patch_%06d.png", state.patch.index);
-            const auto path = echo_dir / name;
+            const auto path = sar_dir / name;
             if (fs::exists(path) && !overwrite_)
             {
                 return;
@@ -932,10 +1701,12 @@ namespace workflow::infer
 
     void processPatch(const PatchPacket &packet,
                       const RuntimeState &base_state,
+                      const UiRenderContext &ui_context,
                       PatchTensorBuilder &tensor_builder,
                       PatchInferenceRunner &runner,
                       IFrameSink &sink,
-                      const AppConfig &cfg)
+                      const AppConfig &cfg,
+                      int &frame_counter)
     {
         RuntimeState state = base_state;
         state.patch = packet.info;
@@ -950,23 +1721,31 @@ namespace workflow::infer
         cv::Mat restore_bgr;
         cv::cvtColor(restore_gray, restore_bgr, cv::COLOR_GRAY2BGR);
         cv::Mat mask_bgr = logitsToMaskBgr(host_outputs[1]);
-        cv::Mat frame_bgr = composeSideBySide(restore_bgr, mask_bgr, cfg.display_width, cfg.display_height);
 
         state.infer_ms = std::chrono::duration<double, std::milli>(infer_end - infer_start).count();
+        state.frame_index = ++frame_counter;
         state.total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - patch_start).count();
+        state.fps = state.total_ms > 0.0 ? (1000.0 / state.total_ms) : 0.0;
+        cv::Mat frame_bgr = composeIndustrialUiFrame(ui_context, state, restore_bgr, mask_bgr, cfg.display_width, cfg.display_height);
+        state.total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - patch_start).count();
+        state.fps = state.total_ms > 0.0 ? (1000.0 / state.total_ms) : 0.0;
+        frame_bgr = composeIndustrialUiFrame(ui_context, state, restore_bgr, mask_bgr, cfg.display_width, cfg.display_height);
         sink.write(state, frame_bgr);
 
-        spdlog::info("[{}/{}] {} patch #{} row={} col={} x={} y={} infer={:.2f}ms total={:.2f}ms",
-                     state.echo_index,
-                     state.echo_count,
-                     state.echo_stem,
-                     state.patch.index,
+        spdlog::info("[{}/{}] {} patch #{}/{} frame={} row={} col={} x={} y={} infer={:.2f}ms total={:.2f}ms fps={:.1f}",
+                     state.sar_index,
+                     state.sar_count,
+                     state.sar_stem,
+                     state.patch.index + 1,
+                     state.patch_count,
+                     state.frame_index,
                      state.patch.grid_row,
                      state.patch.grid_col,
                      state.patch.x,
                      state.patch.y,
                      state.infer_ms,
-                     state.total_ms);
+                     state.total_ms,
+                     state.fps);
     }
     }
 
@@ -1033,22 +1812,23 @@ int Run(const std::filesystem::path &config_path)
 
         setStage("create inference runner");
         PatchInferenceRunner runner(session, device, cfg.output_wait_ms);
+        int frame_counter = 0;
 
         for (size_t sar_idx = 0; sar_idx < sar_files.size(); ++sar_idx)
         {
             const auto &sar_path = sar_files[sar_idx];
             RuntimeState base_state;
-            base_state.echo_stem = sar_path.stem().string();
-            base_state.echo_index = static_cast<int>(sar_idx + 1);
-            base_state.echo_count = static_cast<int>(sar_files.size());
+            base_state.sar_stem = sar_path.stem().string();
+            base_state.sar_index = static_cast<int>(sar_idx + 1);
+            base_state.sar_count = static_cast<int>(sar_files.size());
 
-            spdlog::info("Processing SAR image [{}/{}]: {}", base_state.echo_index, base_state.echo_count, sar_path.string());
+            spdlog::info("Processing SAR image [{}/{}]: {}", base_state.sar_index, base_state.sar_count, sar_path.string());
             const cv::Mat sar_norm = loadSarImageNorm(sar_path);
-            spdlog::info("Loaded SAR image {}, size={}x{}, dtype=CV_32FC1, range=0-1", base_state.echo_stem, sar_norm.cols, sar_norm.rows);
+            spdlog::info("Loaded SAR image {}, size={}x{}, dtype=CV_32FC1, range=0-1", base_state.sar_stem, sar_norm.cols, sar_norm.rows);
 
             if (sar_norm.cols < cfg.patch_size || sar_norm.rows < cfg.patch_size)
             {
-                spdlog::warn("Skip {} because SAR image is smaller than 512x512.", base_state.echo_stem);
+                spdlog::warn("Skip {} because SAR image is smaller than 512x512.", base_state.sar_stem);
                 continue;
             }
             if (cfg.patch_mode != "auto_snake")
@@ -1057,16 +1837,21 @@ int Run(const std::filesystem::path &config_path)
             }
 
             SnakePatchSource patch_source(sar_norm, cfg.patch_size, cfg.stride);
+            base_state.patch_count = patch_source.totalPatches();
             spdlog::info("Patch grid for {}: rows={}, cols={}, total={}",
-                         base_state.echo_stem,
+                         base_state.sar_stem,
                          patch_source.rows(),
                          patch_source.cols(),
                          patch_source.totalPatches());
 
+            UiRenderContext ui_context;
+            ui_context.output_label = buildOutputLabel(cfg);
+            ui_context.mini_map = buildMiniMapContext(sar_norm, cfg.patch_size, cfg.stride, patch_source.rows(), patch_source.cols());
+
             PatchPacket packet;
             while (patch_source.next(packet))
             {
-                processPatch(packet, base_state, tensor_builder, runner, *sink, cfg);
+                processPatch(packet, base_state, ui_context, tensor_builder, runner, *sink, cfg, frame_counter);
             }
         }
 
