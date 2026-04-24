@@ -1223,7 +1223,7 @@ namespace workflow::infer
         const int badge_width = std::max(120, shell_rect.width / 8);
         const int title_x = header_rect.x + header_pad * 2 + std::max(36, header_height / 2);
         cv::putText(canvas,
-                    "EDGE AI CONTROL TERMINAL",
+                    "UAV CONTROL TERMINAL",
                     cv::Point(title_x, header_rect.y + header_pad + header_rect.height / 4),
                     font_face,
                     eyebrow_scale,
@@ -1395,7 +1395,7 @@ namespace workflow::infer
 
         const cv::Rect restore_body = drawPanel(canvas,
                                                 restore_panel,
-                                                "RESTORED SAR WINDOW",
+                                                "RESTORED SAR",
                                                 "NET / RESTORE",
                                                 panel_header,
                                                 panel_bg,
@@ -1434,7 +1434,7 @@ namespace workflow::infer
 
         const cv::Rect seg_body = drawPanel(canvas,
                                             seg_panel,
-                                            "SEGMENTATION RGB WINDOW",
+                                            "SEGMENTATION RGB",
                                             "NET / SEGMENT",
                                             panel_header,
                                             panel_bg,
