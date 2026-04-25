@@ -25,4 +25,6 @@ namespace workflow::shared
                      const std::string &key,
                      bool default_value,
                      const std::string &error_context = {});
+
+    void WriteTextFileAtomically(const std::filesystem::path &path, const std::string &content);
 }

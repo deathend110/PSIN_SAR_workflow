@@ -21,4 +21,5 @@ namespace workflow::rd
     };
 
     AppConfig LoadConfig(const std::filesystem::path &config_path);
+    void SaveConfig(const std::filesystem::path &config_path, const AppConfig &cfg);
 }

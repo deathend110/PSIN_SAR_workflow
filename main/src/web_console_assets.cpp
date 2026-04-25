@@ -22,6 +22,8 @@ namespace workflow::web::assets
       <div class="hero-meta">
         <span class="badge success">Single Device / Single Active Job</span>
         <span class="badge">HTTP + SSE</span>
+        <button class="icon-button" id="settings-toggle" type="button" aria-expanded="false">&#9881; Settings</button>
+        <button class="shutdown-button" id="shutdown-web" type="button" title="Shutdown Web Console" aria-label="Shutdown Web Console">&#x23FB;</button>
       </div>
     </header>
 
@@ -35,7 +37,6 @@ namespace workflow::web::assets
         <div class="button-grid button-grid-2" id="output-buttons"></div>
         <h2>Run Control</h2>
         <div class="button-grid button-grid-2" id="command-buttons"></div>
-        <div class="note" id="manual-note">manual_flight endpoints are visible but reserved for a future phase.</div>
       </section>
 
       <section class="card sources">
@@ -58,7 +59,7 @@ namespace workflow::web::assets
         <div class="kv-grid" id="status-grid"></div>
       </section>
 
-      <section class="card settings">
+      <section class="card settings" id="settings-panel" hidden>
         <div class="section-header">
           <h2>Settings Workspace</h2>
           <button class="primary" id="save-settings">Apply In-Memory Settings</button>
@@ -135,13 +136,17 @@ body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:v
 .button-grid{display:grid;grid-template-columns:1fr;gap:10px}
 .button-grid-2{grid-template-columns:1fr 1fr}
 button{font:inherit;cursor:pointer}
-.choice,.command,.secondary,.primary,.reserved-item{border-radius:14px;border:1px solid var(--line);background:#f8fafc;padding:12px 14px;color:#1f2937;transition:.15s}
+.choice,.command,.secondary,.primary,.reserved-item,.icon-button,.shutdown-button{border-radius:14px;border:1px solid var(--line);background:#f8fafc;padding:12px 14px;color:#1f2937;transition:.15s}
 .choice.active{border-color:#14b8a6;background:var(--accent-soft);color:#134e4a}
 .command.start{background:#ecfdf5;border-color:#86efac;color:#166534}
 .command.pause{background:#fffbeb;border-color:#fcd34d;color:#92400e}
 .command.stop{background:#fef2f2;border-color:#fca5a5;color:#991b1b}
 .primary{background:#0f766e;border-color:#0f766e;color:#fff}
 .secondary{background:#fff}
+.icon-button{background:#fff;color:#0f172a;white-space:nowrap}
+.shutdown-button{width:48px;height:48px;padding:0;border-radius:999px;background:#facc15;border-color:#eab308;color:#713f12;display:inline-flex;align-items:center;justify-content:center;font-size:22px;line-height:1}
+.shutdown-button:hover{background:#fde047}
+.shutdown-button:disabled{cursor:default;opacity:.7}
 .note{padding:12px;border-radius:14px;background:var(--warn-soft);color:var(--warn);font-size:13px}
 .section-header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
 .sources{grid-column:2/3}
@@ -163,6 +168,7 @@ button{font:inherit;cursor:pointer}
 .kv-grid .status-key{color:var(--muted);font-weight:600;letter-spacing:.04em}
 .kv-grid .status-value{text-align:right;white-space:normal;word-break:break-word;overflow-wrap:anywhere}
 .settings{grid-column:2/4}
+.settings[hidden]{display:none}
 .settings-grid{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap:16px}
 .settings-column{border:1px solid var(--line);border-radius:16px;padding:14px;background:#f8fafc}
 .settings-column h3{margin:0 0 12px;font-size:15px}
@@ -207,7 +213,7 @@ const flightFields=[
   ["flight.cache_grid_px","cache_grid_px"],["flight.path_overlay","path_overlay"],["flight.control_bindings","control_bindings"]
 ];
 
-const app={ state:null, settings:{}, sources:[], selectedSource:"", eventSource:null };
+const app={ state:null, settings:{}, sources:[], selectedSource:"", eventSource:null, settingsVisible:false, shutdownInProgress:false, connectionClosedNotified:false };
 
 function logLine(message){
   const box=document.getElementById("log-box");
@@ -319,10 +325,29 @@ function renderSettingsSection(containerId, fields){
   });
 }
 
+function syncSettingsVisibility(){
+  const panel=document.getElementById("settings-panel");
+  const toggle=document.getElementById("settings-toggle");
+  panel.hidden=!app.settingsVisible;
+  toggle.setAttribute("aria-expanded", app.settingsVisible ? "true" : "false");
+  toggle.innerHTML=app.settingsVisible ? "&#9881; Hide Settings" : "&#9881; Settings";
+}
+
+function syncShutdownButton(){
+  const button=document.getElementById("shutdown-web");
+  if(!button){return;}
+  button.disabled=app.shutdownInProgress;
+  button.title=app.shutdownInProgress ? "Web Console is shutting down" : "Shutdown Web Console";
+}
+
 function renderAll(){
   if(!app.state){return;}
   renderButtons("workflow-buttons", workflowChoices, app.state.workflow_mode, async (value)=>{
+    if(app.state.workflow_mode===value){
+      return;
+    }
     app.state.workflow_mode=value;
+    app.selectedSource="";
     await pushSelection();
     await reloadSources();
   });
@@ -341,6 +366,8 @@ function renderAll(){
   renderSettingsSection("infer-settings", inferFields);
   renderSettingsSection("rd-settings", rdFields);
   renderSettingsSection("flight-settings", flightFields);
+  syncSettingsVisibility();
+  syncShutdownButton();
 }
 
 function renderCommandButtons(){
@@ -408,34 +435,61 @@ async function reloadSources(){
 function connectEvents(){
   app.eventSource=new EventSource("/events");
   app.eventSource.addEventListener("state",(event)=>{
+    app.connectionClosedNotified=false;
     app.state=JSON.parse(event.data);
     app.selectedSource=app.state.selected_source || app.selectedSource;
     renderAll();
   });
   app.eventSource.addEventListener("log",(event)=>{
+    app.connectionClosedNotified=false;
     const payload=JSON.parse(event.data);
     logLine(payload.message);
   });
   app.eventSource.addEventListener("error",(event)=>{
-    const payload=JSON.parse(event.data);
-    logLine(`ERROR: ${payload.message}`);
+    if(typeof event.data === "string" && event.data.length){
+      app.connectionClosedNotified=false;
+      const payload=JSON.parse(event.data);
+      logLine(`ERROR: ${payload.message}`);
+      return;
+    }
+    if(app.connectionClosedNotified){
+      return;
+    }
+    app.connectionClosedNotified=true;
+    logLine(app.shutdownInProgress ? "Web Console connection closed." : "Event stream disconnected. Waiting for reconnect...");
+    if(app.shutdownInProgress && app.eventSource){
+      app.eventSource.close();
+    }
   });
 }
 
-async function saveSettings(){
-  const payload={};
-  document.querySelectorAll(".settings input").forEach((input)=>{
-    payload[input.dataset.key]=input.value;
-  });
-  const response=await postJson("/api/settings", payload);
-  logLine(`settings: ${response.message}`);
-  await refreshSettings();
-  await reloadSources();
+async function shutdownWebConsole(){
+  if(app.shutdownInProgress){
+    return;
+  }
+  const confirmed=window.confirm("这会关闭板子上的 Web 控制台服务，当前页面将断开连接，并保存当前设置。是否继续？");
+  if(!confirmed){
+    return;
+  }
+  app.shutdownInProgress=true;
+  syncShutdownButton();
+  logLine("Web Console is shutting down...");
+  try{
+    const response=await postJson("/api/command/shutdown_web",{});
+    logLine(`shutdown: ${response.message}`);
+  }catch(error){
+    logLine(`shutdown request interrupted: ${error.message}`);
+  }
 }
 
 function bindStaticActions(){
   document.getElementById("reload-sources").onclick=reloadSources;
   document.getElementById("save-settings").onclick=saveSettings;
+  document.getElementById("settings-toggle").onclick=()=>{
+    app.settingsVisible=!app.settingsVisible;
+    syncSettingsVisibility();
+  };
+  document.getElementById("shutdown-web").onclick=shutdownWebConsole;
   document.getElementById("clear-logs").onclick=()=>{ document.getElementById("log-box").textContent=""; };
   document.querySelectorAll("[data-manual-key]").forEach((button)=>{
     button.onclick=async ()=>{
@@ -450,6 +504,17 @@ function bindStaticActions(){
       logLine(`manual: ${response.message}`);
     }
   });
+}
+
+async function saveSettings(){
+  const payload={};
+  document.querySelectorAll(".settings input").forEach((input)=>{
+    payload[input.dataset.key]=input.value;
+  });
+  const response=await postJson("/api/settings", payload);
+  logLine(`settings: ${response.message}`);
+  await refreshSettings();
+  await reloadSources();
 }
 
 async function boot(){

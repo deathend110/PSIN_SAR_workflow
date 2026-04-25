@@ -13,6 +13,7 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <unordered_map>
 
 namespace workflow::web
 {
@@ -24,6 +25,39 @@ namespace workflow::web
         {
             g_web_console_stop = true;
         }
+
+        std::unordered_map<std::string, std::string> MakeFlightSettingsFields(const FlightSettings &settings)
+        {
+            return {
+                {"flight.manual_step_px", std::to_string(settings.manual_step_px)},
+                {"flight.boost_step_px", std::to_string(settings.boost_step_px)},
+                {"flight.trigger_distance_px", std::to_string(settings.trigger_distance_px)},
+                {"flight.cache_grid_px", std::to_string(settings.cache_grid_px)},
+                {"flight.path_overlay", settings.path_overlay ? "true" : "false"},
+                {"flight.control_bindings", settings.control_bindings},
+            };
+        }
+
+        void ApplyInitialFlightSettings(WebConsoleController &controller, const FlightSettings &settings)
+        {
+            const auto response = controller.applySettings(MakeFlightSettingsFields(settings));
+            if (response.find("\"ok\":false") != std::string::npos)
+            {
+                throw std::runtime_error("Failed to apply persisted flight settings.");
+            }
+        }
+
+        void PersistControllerConfigs(const std::filesystem::path &web_config_path,
+                                      const WebConsoleConfig &base_web_cfg,
+                                      const WebConsoleController &controller)
+        {
+            infer::SaveConfig(base_web_cfg.infer_config_path, controller.inferConfig());
+            rd::SaveConfig(base_web_cfg.rd_config_path, controller.rdConfig());
+
+            WebConsoleConfig persisted_web_cfg = base_web_cfg;
+            persisted_web_cfg.flight_settings = controller.flightSettings();
+            SaveConfig(web_config_path, persisted_web_cfg);
+        }
     }
 
     int Run(const std::filesystem::path &config_path)
@@ -32,20 +66,26 @@ namespace workflow::web
         std::unique_ptr<WebConsoleController> controller;
         std::unique_ptr<WebConsoleServer> server;
         std::exception_ptr server_error;
+        WebConsoleConfig web_cfg;
+        bool web_cfg_loaded = false;
+        bool configs_persisted = false;
         try
         {
             g_web_console_stop = false;
             std::signal(SIGINT, handleInterrupt);
             std::signal(SIGTERM, handleInterrupt);
 
-            const WebConsoleConfig web_cfg = LoadConfig(config_path);
+            web_cfg = LoadConfig(config_path);
+            web_cfg_loaded = true;
             const infer::AppConfig infer_cfg = infer::LoadConfig(web_cfg.infer_config_path);
             const rd::AppConfig rd_cfg = rd::LoadConfig(web_cfg.rd_config_path);
 
             controller = std::make_unique<WebConsoleController>(infer_cfg, rd_cfg);
+            ApplyInitialFlightSettings(*controller, web_cfg.flight_settings);
             server = std::make_unique<WebConsoleServer>(web_cfg, *controller);
 
             std::cout << "Web Console listening on http://" << web_cfg.bind_address << ":" << web_cfg.port << std::endl;
+            std::cout << "Board IP: http://" << web_cfg.board_ip << ":" << web_cfg.port << std::endl;
             std::cout << "Press Ctrl+C to stop the embedded web service." << std::endl;
 
             web_thread = std::thread([&]() {
@@ -73,6 +113,8 @@ namespace workflow::web
                 web_thread.join();
             }
             controller->JoinWorker();
+            PersistControllerConfigs(config_path, web_cfg, *controller);
+            configs_persisted = true;
 
             if (server_error)
             {
@@ -98,6 +140,17 @@ namespace workflow::web
             if (controller)
             {
                 controller->JoinWorker();
+            }
+            if (controller && web_cfg_loaded && !configs_persisted)
+            {
+                try
+                {
+                    PersistControllerConfigs(config_path, web_cfg, *controller);
+                }
+                catch (const std::exception &persist_error)
+                {
+                    std::cerr << "web_console persist failed: " << persist_error.what() << std::endl;
+                }
             }
             std::cerr << "web_console failed: " << e.what() << std::endl;
             return 2;

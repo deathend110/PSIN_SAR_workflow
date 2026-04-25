@@ -43,6 +43,7 @@ namespace workflow::web
         std::string commandPause();
         std::string commandStop();
         std::string commandReset();
+        std::string commandShutdownWeb();
         std::string commandManualKey(const std::unordered_map<std::string, std::string> &fields);
 
     private:
@@ -72,6 +73,7 @@ namespace workflow::web
                         infer::AppConfig infer_cfg,
                         rd::AppConfig rd_cfg,
                         shared::WorkflowRunControl *control);
+        std::string stopWorkflow(bool wait_for_worker, const std::string &success_message);
         void joinWorkerIfNeeded();
         bool isRunningState(shared::ControlState state) const;
         void restoreLastAppliedLocked();

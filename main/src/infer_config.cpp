@@ -2,10 +2,19 @@
 
 #include "workflow/shared/config_utils.hpp"
 
+#include <sstream>
 #include <stdexcept>
 
 namespace workflow::infer
 {
+    namespace
+    {
+        const char *BoolText(bool value)
+        {
+            return value ? "true" : "false";
+        }
+    }
+
     AppConfig LoadConfig(const std::filesystem::path &config_path)
     {
         const auto values = shared::LoadSimpleYaml(config_path);
@@ -61,5 +70,48 @@ namespace workflow::infer
         }
 
         return cfg;
+    }
+
+    void SaveConfig(const std::filesystem::path &config_path, const AppConfig &cfg)
+    {
+        std::ostringstream oss;
+        oss << "sys:\n";
+        oss << "  device: " << cfg.device_url << "\n";
+        oss << "  run_backend: " << cfg.run_backend << "\n";
+        oss << "  mmuMode: " << BoolText(cfg.mmu_mode) << "\n";
+        oss << "  speedMode: " << BoolText(cfg.speed_mode) << "\n";
+        oss << "  compressFtmp: " << BoolText(cfg.compress_ftmp) << "\n";
+        oss << "  ocm_option: " << cfg.ocm_option << "\n";
+        oss << "  profile: " << BoolText(cfg.enable_profile) << "\n\n";
+
+        oss << "input:\n";
+        oss << "  sar_img_dir: " << cfg.sar_img_dir.string() << "\n";
+        oss << "  sar_img_ext: " << cfg.sar_img_ext << "\n";
+        oss << "  recursive: " << BoolText(cfg.recursive) << "\n\n";
+
+        oss << "pipeline:\n";
+        oss << "  patch:\n";
+        oss << "    mode: " << cfg.patch_mode << "\n";
+        oss << "    patch_size: " << cfg.patch_size << "\n";
+        oss << "    stride: " << cfg.stride << "\n";
+        oss << "  icore:\n";
+        oss << "    json: " << cfg.json_path << "\n";
+        oss << "    raw: " << cfg.raw_path << "\n";
+        oss << "  output_wait_ms: " << cfg.output_wait_ms << "\n\n";
+
+        oss << "display:\n";
+        oss << "  width: " << cfg.display_width << "\n";
+        oss << "  height: " << cfg.display_height << "\n";
+        oss << "  fps: " << cfg.display_fps << "\n\n";
+
+        oss << "output:\n";
+        oss << "  mode: " << cfg.output_mode << "\n";
+        oss << "  dir: " << cfg.output_dir.string() << "\n";
+        oss << "  overwrite: " << BoolText(cfg.overwrite) << "\n\n";
+
+        oss << "debug:\n";
+        oss << "  dump_backend_log: " << BoolText(cfg.dump_backend_log) << "\n";
+
+        shared::WriteTextFileAtomically(config_path, oss.str());
     }
 }

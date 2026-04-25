@@ -1,5 +1,6 @@
 server:
   bind: 0.0.0.0
+  board_ip: 192.168.1.10
   port: 8080
   sse_heartbeat_ms: 1000
 
@@ -9,3 +10,11 @@ ui:
 config:
   infer_path: configs/infer_workflow.yaml
   rd_path: configs/rd_imaging.yaml
+
+flight:
+  manual_step_px: 128
+  boost_step_px: 256
+  trigger_distance_px: 128
+  cache_grid_px: 64
+  path_overlay: true
+  control_bindings: W/A/S/D

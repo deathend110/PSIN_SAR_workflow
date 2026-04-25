@@ -230,6 +230,8 @@ namespace workflow::web
         shared::WorkflowSelection next_selection;
         infer::AppConfig next_infer_cfg;
         bool stop_paused_workflow = false;
+        bool workflow_changed = false;
+        bool selected_source_provided = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (runtime_snapshot_.state == shared::ControlState::Starting ||
@@ -248,6 +250,7 @@ namespace workflow::web
                 {
                     return MakeErrorResponse("invalid_selection", "workflow_mode must be rd or infer.");
                 }
+                workflow_changed = workflow != next_selection.workflow;
                 next_selection.workflow = workflow;
             }
             if (const auto it = fields.find("patch_mode"); it != fields.end())
@@ -273,6 +276,12 @@ namespace workflow::web
             if (const auto it = fields.find("selected_source"); it != fields.end())
             {
                 next_selection.selected_source = it->second;
+                selected_source_provided = true;
+            }
+
+            if (workflow_changed && !selected_source_provided)
+            {
+                next_selection.selected_source.clear();
             }
 
             if (!next_selection.selected_source.empty())
@@ -282,7 +291,14 @@ namespace workflow::web
                                           : listRdSourcesLocked();
                 if (!hasSourceId(sources, next_selection.selected_source))
                 {
-                    return MakeErrorResponse("invalid_selection", "selected_source is not available for the current workflow.");
+                    if (workflow_changed)
+                    {
+                        next_selection.selected_source.clear();
+                    }
+                    else
+                    {
+                        return MakeErrorResponse("invalid_selection", "selected_source is not available for the current workflow.");
+                    }
                 }
             }
 
@@ -640,50 +656,21 @@ namespace workflow::web
 
     std::string WebConsoleController::commandStop()
     {
-        std::thread worker_to_join;
-        EventCallback callback;
-        std::vector<PendingEvent> events;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!isRunningState(runtime_snapshot_.state))
-            {
-                return MakeErrorResponse("invalid_state", "No running workflow to stop.");
-            }
-            stop_requested_by_controller_ = true;
-            runtime_snapshot_.state = shared::ControlState::Stopping;
-            if (run_control_)
-            {
-                run_control_->requestStop();
-            }
-            if (worker_.joinable())
-            {
-                worker_to_join = std::move(worker_);
-            }
-            callback = event_callback_;
-            queueStateLocked(events);
-            queueLogLocked(events, "Stop requested at next safe point.");
-        }
-
-        dispatchEvents(callback, events);
-
-        if (worker_to_join.joinable())
-        {
-            worker_to_join.join();
-        }
-        joinWorkerIfNeeded();
-        return MakeOkResponse("Workflow stopped.");
+        return stopWorkflow(false, "Stop requested.");
     }
 
     std::string WebConsoleController::commandReset()
     {
         if (isRunningState(snapshot().state))
         {
-            const std::string stop_response = commandStop();
+            const std::string stop_response = stopWorkflow(true, "Workflow stopped.");
             if (stop_response.find("\"ok\":false") != std::string::npos)
             {
                 return stop_response;
             }
         }
+
+        joinWorkerIfNeeded();
 
         EventCallback callback;
         std::vector<PendingEvent> events;
@@ -705,6 +692,30 @@ namespace workflow::web
         }
         dispatchEvents(callback, events);
         return MakeOkResponse("Controller reset completed.");
+    }
+
+    std::string WebConsoleController::commandShutdownWeb()
+    {
+        if (isRunningState(snapshot().state))
+        {
+            const std::string stop_response = stopWorkflow(true, "Workflow stopped for web console shutdown.");
+            if (stop_response.find("\"ok\":false") != std::string::npos)
+            {
+                return stop_response;
+            }
+        }
+
+        joinWorkerIfNeeded();
+
+        EventCallback callback;
+        std::vector<PendingEvent> events;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callback = event_callback_;
+            queueLogLocked(events, "Web console shutdown requested by browser.");
+        }
+        dispatchEvents(callback, events);
+        return MakeOkResponse("Web Console shutdown requested.");
     }
 
     std::string WebConsoleController::commandManualKey(const std::unordered_map<std::string, std::string> &)
@@ -852,6 +863,45 @@ namespace workflow::web
             queueStateLocked(events);
         }
         dispatchEvents(callback, events);
+    }
+
+    std::string WebConsoleController::stopWorkflow(bool wait_for_worker, const std::string &success_message)
+    {
+        std::thread worker_to_join;
+        EventCallback callback;
+        std::vector<PendingEvent> events;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!isRunningState(runtime_snapshot_.state))
+            {
+                return MakeErrorResponse("invalid_state", "No running workflow to stop.");
+            }
+            stop_requested_by_controller_ = true;
+            runtime_snapshot_.state = shared::ControlState::Stopping;
+            if (run_control_)
+            {
+                run_control_->requestStop();
+            }
+            if (wait_for_worker && worker_.joinable())
+            {
+                worker_to_join = std::move(worker_);
+            }
+            callback = event_callback_;
+            queueStateLocked(events);
+            queueLogLocked(events, wait_for_worker ? "Stop requested. Waiting for workflow thread to exit." : "Stop requested at next safe point.");
+        }
+
+        dispatchEvents(callback, events);
+
+        if (worker_to_join.joinable())
+        {
+            worker_to_join.join();
+        }
+        if (wait_for_worker)
+        {
+            joinWorkerIfNeeded();
+        }
+        return MakeOkResponse(success_message);
     }
 
     void WebConsoleController::joinWorkerIfNeeded()

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <utility>
@@ -142,5 +143,44 @@ namespace workflow::shared
     {
         const auto it = values.find(key);
         return it == values.end() ? default_value : ParseBool(it->second, error_context);
+    }
+
+    void WriteTextFileAtomically(const std::filesystem::path &path, const std::string &content)
+    {
+        const auto parent = path.parent_path();
+        if (!parent.empty())
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(parent, ec);
+            if (ec)
+            {
+                throw std::runtime_error("Failed to prepare config directory: " + parent.string());
+            }
+        }
+
+        const auto temp_path = path.string() + ".tmp";
+        {
+            std::ofstream ofs(temp_path, std::ios::binary | std::ios::trunc);
+            if (!ofs)
+            {
+                throw std::runtime_error("Failed to open temp config file for write: " + temp_path);
+            }
+            ofs << content;
+            ofs.flush();
+            if (!ofs)
+            {
+                throw std::runtime_error("Failed to write config file: " + temp_path);
+            }
+        }
+
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        ec.clear();
+        std::filesystem::rename(temp_path, path, ec);
+        if (ec)
+        {
+            std::filesystem::remove(temp_path, ec);
+            throw std::runtime_error("Failed to replace config file: " + path.string());
+        }
     }
 }

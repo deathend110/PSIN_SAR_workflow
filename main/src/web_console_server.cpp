@@ -472,6 +472,15 @@ namespace workflow::web
             {
                 sendString(client_fd, makeHttpResponse("200 OK", "application/json; charset=utf-8", controller_.commandReset()));
             }
+            else if (request.method == "POST" && request.path == "/api/command/shutdown_web")
+            {
+                const std::string response = controller_.commandShutdownWeb();
+                sendString(client_fd, makeHttpResponse("200 OK", "application/json; charset=utf-8", response));
+                if (response.find("\"ok\":false") == std::string::npos)
+                {
+                    stop_requested_ = true;
+                }
+            }
             else if (request.method == "POST" && request.path == "/api/manual/key")
             {
                 sendString(client_fd, makeHttpResponse("200 OK",

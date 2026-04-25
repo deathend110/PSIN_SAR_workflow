@@ -2,10 +2,19 @@
 
 #include "workflow/shared/config_utils.hpp"
 
+#include <sstream>
 #include <stdexcept>
 
 namespace workflow::rd
 {
+    namespace
+    {
+        const char *BoolText(bool value)
+        {
+            return value ? "true" : "false";
+        }
+    }
+
     AppConfig LoadConfig(const std::filesystem::path &config_path)
     {
         const auto values = shared::LoadSimpleYaml(config_path);
@@ -45,5 +54,24 @@ namespace workflow::rd
         }
 
         return cfg;
+    }
+
+    void SaveConfig(const std::filesystem::path &config_path, const AppConfig &cfg)
+    {
+        std::ostringstream oss;
+        oss << "rd:\n";
+        oss << "  execution_mode: " << cfg.execution_mode << "\n";
+        oss << "  echo_dir: " << cfg.echo_dir.string() << "\n";
+        oss << "  echo_ext: " << cfg.echo_ext << "\n";
+        oss << "  output_dir: " << cfg.output_dir.string() << "\n";
+        oss << "  scratch_dir: " << cfg.scratch_dir.string() << "\n";
+        oss << "  column_tile: " << cfg.column_tile << "\n";
+        oss << "  row_tile: " << cfg.row_tile << "\n";
+        oss << "  prefer_memory_pipeline: " << BoolText(cfg.prefer_memory_pipeline) << "\n";
+        oss << "  memory_limit_mb: " << cfg.memory_limit_mb << "\n";
+        oss << "  keep_scratch: " << BoolText(cfg.keep_scratch) << "\n";
+        oss << "  overwrite: " << BoolText(cfg.overwrite) << "\n";
+
+        shared::WriteTextFileAtomically(config_path, oss.str());
     }
 }
