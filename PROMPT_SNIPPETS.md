@@ -2,7 +2,7 @@
 
 > 这里是可以直接复制给 Codex 的提示模板。
 
-删除SAR master skill
+main\CMakeLists.txt和main\build_main.sh需要更新吗？
 
 ---
 

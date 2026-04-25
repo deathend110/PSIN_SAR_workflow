@@ -55,17 +55,27 @@ namespace
 
 int main()
 {
-    switch (PromptForMode())
+    while (true)
     {
-    case workflow::AppMode::RdOnly:
-        return workflow::rd::Run(kRdConfigPath);
-    case workflow::AppMode::InferOnly:
-        return workflow::infer::Run(kInferConfigPath);
-    case workflow::AppMode::WebConsole:
-        return workflow::web::Run(kWebConfigPath);
-    case workflow::AppMode::Exit:
-    default:
-        std::cout << "Exit without running any workflow.\n";
-        return 0;
+        switch (PromptForMode())
+        {
+        case workflow::AppMode::RdOnly:
+            return workflow::rd::Run(kRdConfigPath);
+        case workflow::AppMode::InferOnly:
+            return workflow::infer::Run(kInferConfigPath);
+        case workflow::AppMode::WebConsole:
+        {
+            const int result = workflow::web::Run(kWebConfigPath);
+            if (result != 0)
+            {
+                return result;
+            }
+            break;
+        }
+        case workflow::AppMode::Exit:
+        default:
+            std::cout << "Exit without running any workflow.\n";
+            return 0;
+        }
     }
 }
