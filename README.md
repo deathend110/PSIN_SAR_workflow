@@ -129,7 +129,6 @@ cd main
 
 如果你要修改运行时代码，优先看：
 
-- [AGENTS.md](./AGENTS.md)
 - [ARCHITECTURE.md](./ARCHITECTURE.md)
 - [CODEBASE_MAP.md](./CODEBASE_MAP.md)
 - [main/README.md](./main/README.md)
