@@ -12,7 +12,10 @@ config:
   rd_path: configs/rd_imaging.yaml
 
 flight:
+  # manual_step_px 在扫描游标模式下不再驱动连续速度，manual 实际步长优先对齐 infer.stride。
   manual_step_px: 128
+  # boost_step_px / trigger_distance_px / cache_grid_px 为兼容旧配置保留，
+  # 当前扫描游标模式不再依赖它们驱动 manual patch 前进。
   boost_step_px: 256
   trigger_distance_px: 128
   cache_grid_px: 64

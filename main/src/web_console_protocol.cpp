@@ -319,16 +319,15 @@ namespace workflow::web
         appendJsonField(oss, first, "manual.configured", manual_telemetry.configured ? "true" : "false", false);
         appendJsonField(oss, first, "manual.active", manual_telemetry.active ? "true" : "false", false);
         appendJsonField(oss, first, "manual.paused", manual_telemetry.paused ? "true" : "false", false);
+        appendJsonField(oss, first, "manual.edge_blocked", manual_telemetry.edge_blocked ? "true" : "false", false);
         appendJsonField(oss, first, "manual.position_x", std::to_string(manual_telemetry.position_x), false);
         appendJsonField(oss, first, "manual.position_y", std::to_string(manual_telemetry.position_y), false);
-        appendJsonField(oss, first, "manual.velocity_x", std::to_string(manual_telemetry.velocity_x), false);
-        appendJsonField(oss, first, "manual.velocity_y", std::to_string(manual_telemetry.velocity_y), false);
-        appendJsonField(oss, first, "manual.requested_center_x", std::to_string(manual_telemetry.requested_center_x), false);
-        appendJsonField(oss, first, "manual.requested_center_y", std::to_string(manual_telemetry.requested_center_y), false);
         appendJsonField(oss, first, "manual.last_inferred_center_x", std::to_string(manual_telemetry.last_inferred_center_x), false);
         appendJsonField(oss, first, "manual.last_inferred_center_y", std::to_string(manual_telemetry.last_inferred_center_y), false);
         appendJsonField(oss, first, "manual.path_points", std::to_string(manual_telemetry.path_points), false);
-        appendJsonField(oss, first, "manual.active_keys", manual_telemetry.active_keys);
+        appendJsonField(oss, first, "manual.patch_count", std::to_string(manual_telemetry.patch_count), false);
+        appendJsonField(oss, first, "manual.current_direction", manual_telemetry.current_direction);
+        appendJsonField(oss, first, "manual.pending_direction", manual_telemetry.pending_direction);
         oss << "}";
         return oss.str();
     }

@@ -43,7 +43,9 @@ input:
 pipeline:
   patch:
     # patch 输入模式。
-    # 当前第 0 阶段只实现 auto_snake；manual_flight 接口已在代码中预留，后续接控制端。
+    # auto_snake = 自动蛇形扫描。
+    # manual_flight = 低自由度扫描游标模式：
+    #   左上角起点、默认向右、W/A/S/D 只改方向、每完成一个 patch 再推进一步。
     mode: auto_snake
 
     # 模型输入 patch 尺寸。当前模型固定要求 512x512，输入数据为 float32 0-1。

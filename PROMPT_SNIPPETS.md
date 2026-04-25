@@ -2,6 +2,10 @@
 
 > 这里是可以直接复制给 Codex 的提示模板。
 
+现在有个bug：
+web 控制台点击右上角的关闭web console会直接把板子上运行的程序一起关闭。
+你依据 BUGFIX_TEMPLATE.md进行排查，在bug文件夹下落地一份新的bugfix文件
+
 ---
 
 ## 1. 阅读模式

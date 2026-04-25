@@ -209,16 +209,15 @@ namespace workflow::web
         telemetry.configured = infer_telemetry.configured;
         telemetry.active = infer_telemetry.active;
         telemetry.paused = infer_telemetry.paused;
+        telemetry.edge_blocked = infer_telemetry.edge_blocked;
         telemetry.position_x = infer_telemetry.position_x;
         telemetry.position_y = infer_telemetry.position_y;
-        telemetry.velocity_x = infer_telemetry.velocity_x;
-        telemetry.velocity_y = infer_telemetry.velocity_y;
-        telemetry.requested_center_x = infer_telemetry.requested_center_x;
-        telemetry.requested_center_y = infer_telemetry.requested_center_y;
         telemetry.last_inferred_center_x = infer_telemetry.last_inferred_center_x;
         telemetry.last_inferred_center_y = infer_telemetry.last_inferred_center_y;
         telemetry.path_points = infer_telemetry.path_points;
-        telemetry.active_keys = infer_telemetry.active_keys;
+        telemetry.patch_count = infer_telemetry.patch_count;
+        telemetry.current_direction = infer_telemetry.current_direction;
+        telemetry.pending_direction = infer_telemetry.pending_direction;
         return telemetry;
     }
 
@@ -748,7 +747,7 @@ namespace workflow::web
         EventCallback callback;
         std::vector<PendingEvent> events;
         std::string key;
-        bool pressed = false;
+        std::string action;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (runtime_snapshot_.selection.workflow != shared::SelectedWorkflow::InferOnly ||
@@ -770,16 +769,8 @@ namespace workflow::web
             }
 
             key = shared::ToLower(shared::Trim(key_it->second));
-            const std::string action = shared::ToLower(shared::Trim(action_it->second));
-            if (action == "down")
-            {
-                pressed = true;
-            }
-            else if (action == "up")
-            {
-                pressed = false;
-            }
-            else
+            action = shared::ToLower(shared::Trim(action_it->second));
+            if (action != "down" && action != "up")
             {
                 return MakeErrorResponse("invalid_request", "manual_flight action must be down or up.");
             }
@@ -787,8 +778,13 @@ namespace workflow::web
             callback = event_callback_;
         }
 
+        if (action == "up")
+        {
+            return MakeOkResponse("manual direction release ignored in cursor mode.");
+        }
+
         std::string message;
-        if (!infer::SubmitManualFlightKey(key, pressed, &message))
+        if (!infer::SubmitManualFlightKey(key, true, &message))
         {
             return MakeErrorResponse("invalid_manual_key", message);
         }

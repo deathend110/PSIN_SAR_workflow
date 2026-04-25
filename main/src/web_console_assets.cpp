@@ -209,11 +209,11 @@ const rdFields=[
   ["rd.prefer_memory_pipeline","rd.prefer_memory_pipeline"],["rd.keep_scratch","rd.keep_scratch"],["rd.overwrite","rd.overwrite"]
 ];
 const flightFields=[
-  ["flight.manual_step_px","manual_step_px"],["flight.boost_step_px","boost_step_px"],["flight.trigger_distance_px","trigger_distance_px"],
-  ["flight.cache_grid_px","cache_grid_px"],["flight.path_overlay","path_overlay"],["flight.control_bindings","control_bindings"]
+  ["flight.manual_step_px","manual_step_px (manual uses stride)"],["flight.boost_step_px","boost_step_px (ignored by cursor mode)"],["flight.trigger_distance_px","trigger_distance_px (ignored by cursor mode)"],
+  ["flight.cache_grid_px","cache_grid_px (legacy)"],["flight.path_overlay","path_overlay"],["flight.control_bindings","control_bindings"]
 ];
 
-const app={ state:null, settings:{}, sources:[], selectedSource:"", eventSource:null, settingsVisible:false, shutdownInProgress:false, connectionClosedNotified:false, manualKeys:new Set(), manualStatePollTimer:null, manualStatePollInFlight:false };
+const app={ state:null, settings:{}, sources:[], selectedSource:"", eventSource:null, settingsVisible:false, shutdownInProgress:false, connectionClosedNotified:false };
 
 function logLine(message){
   const box=document.getElementById("log-box");
@@ -229,7 +229,21 @@ async function getJson(url){
 
 async function postJson(url, body){
   const response=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
-  return response.json();
+  const statusSuffix=Number.isInteger(response.status) ? ` (HTTP ${response.status})` : "";
+  let responseText="";
+  try{
+    responseText=await response.text();
+  }catch(error){
+    return {ok:false,code:"response_read_failed",message:`${url} response read failed${statusSuffix}: ${error.message}`};
+  }
+  if(!responseText.trim()){
+    return {ok:false,code:"empty_response",message:`${url} returned an empty response body${statusSuffix}.`};
+  }
+  try{
+    return JSON.parse(responseText);
+  }catch(error){
+    return {ok:false,code:"invalid_json_response",message:`${url} returned malformed JSON${statusSuffix}: ${error.message}`};
+  }
 }
 
 function renderButtons(containerId, choices, selected, handler, className){
@@ -263,11 +277,12 @@ function renderStatus(){
   if(app.state.patch_mode==="manual_flight"){
     pairs.push(["MANUAL_ACTIVE",String(app.state["manual.active"] || false)]);
     pairs.push(["MANUAL_PAUSED",String(app.state["manual.paused"] || false)]);
+    pairs.push(["MANUAL_EDGE_BLOCK",String(app.state["manual.edge_blocked"] || false)]);
     pairs.push(["MANUAL_POS",`${app.state["manual.position_x"] || 0}, ${app.state["manual.position_y"] || 0}`]);
-    pairs.push(["MANUAL_VEL",`${app.state["manual.velocity_x"] || 0}, ${app.state["manual.velocity_y"] || 0}`]);
-    pairs.push(["MANUAL_TARGET",`${app.state["manual.requested_center_x"] || 0}, ${app.state["manual.requested_center_y"] || 0}`]);
+    pairs.push(["MANUAL_DIR",app.state["manual.current_direction"] || "-"]);
+    pairs.push(["MANUAL_NEXT_DIR",app.state["manual.pending_direction"] || "-"]);
     pairs.push(["MANUAL_LAST",`${app.state["manual.last_inferred_center_x"] || 0}, ${app.state["manual.last_inferred_center_y"] || 0}`]);
-    pairs.push(["MANUAL_KEYS",app.state["manual.active_keys"] || "-"]);
+    pairs.push(["MANUAL_PATCH_COUNT",String(app.state["manual.patch_count"] || 0)]);
     pairs.push(["MANUAL_PATH",String(app.state["manual.path_points"] || 0)]);
   }
   const grid=document.getElementById("status-grid");
@@ -350,37 +365,19 @@ function syncShutdownButton(){
   button.title=app.shutdownInProgress ? "Web Console is shutting down" : "Shutdown Web Console";
 }
 
-async function sendManualKey(key, action){
+async function sendManualKey(key){
   const normalizedKey=String(key || "").toLowerCase();
-  if(!["w","a","s","d","shift"].includes(normalizedKey)){
+  if(!["w","a","s","d"].includes(normalizedKey)){
     return false;
   }
   if(!app.state || app.state.patch_mode!=="manual_flight"){
     return false;
   }
-  const isPressed=app.manualKeys.has(normalizedKey);
-  if(action==="down"){
-    if(isPressed){
-      return true;
-    }
-  }else if(action==="up"){
-    if(!isPressed){
-      return true;
-    }
-  }else{
-    return false;
-  }
-
   try{
-    const response=await postJson("/api/manual/key",{key:normalizedKey,action:action});
+    const response=await postJson("/api/manual/key",{key:normalizedKey,action:"down"});
     if(!response.ok){
       logLine(`manual: ${response.message}`);
       return false;
-    }
-    if(action==="down"){
-      app.manualKeys.add(normalizedKey);
-    }else{
-      app.manualKeys.delete(normalizedKey);
     }
     return true;
   }catch(error){
@@ -389,45 +386,8 @@ async function sendManualKey(key, action){
   }
 }
 
-async function releaseAllManualKeys(){
-  const keys=Array.from(app.manualKeys);
-  for(const key of keys){
-    await sendManualKey(key,"up");
-  }
-}
-
-function shouldPollManualState(){
-  return !!(app.state &&
-            app.state.patch_mode==="manual_flight" &&
-            (app.state.control_state==="running" || app.state.control_state==="paused"));
-}
-
-async function pollManualState(){
-  if(!shouldPollManualState() || app.manualStatePollInFlight || app.shutdownInProgress){
-    return;
-  }
-  app.manualStatePollInFlight=true;
-  try{
-    await refreshState();
-  }catch(error){
-    logLine(`manual state poll failed: ${error.message}`);
-  }finally{
-    app.manualStatePollInFlight=false;
-  }
-}
-
-function ensureManualStatePolling(){
-  if(app.manualStatePollTimer){
-    return;
-  }
-  app.manualStatePollTimer=window.setInterval(()=>{ void pollManualState(); }, 250);
-}
-
 function renderAll(){
   if(!app.state){return;}
-  if(app.state.patch_mode!=="manual_flight"){
-    app.manualKeys.clear();
-  }
   renderButtons("workflow-buttons", workflowChoices, app.state.workflow_mode, async (value)=>{
     if(app.state.workflow_mode===value){
       return;
@@ -486,9 +446,6 @@ async function pushSelection(){
 
 async function refreshState(){
   app.state=await getJson("/api/state");
-  if(app.state.patch_mode!=="manual_flight"){
-    app.manualKeys.clear();
-  }
   app.selectedSource=app.state.selected_source || app.selectedSource;
   renderAll();
 }
@@ -526,9 +483,6 @@ function connectEvents(){
   app.eventSource.addEventListener("state",(event)=>{
     app.connectionClosedNotified=false;
     app.state=JSON.parse(event.data);
-    if(app.state.patch_mode!=="manual_flight"){
-      app.manualKeys.clear();
-    }
     app.selectedSource=app.state.selected_source || app.selectedSource;
     renderAll();
   });
@@ -587,28 +541,18 @@ function bindStaticActions(){
     const key=button.dataset.manualKey;
     button.onpointerdown=async (event)=>{
       event.preventDefault();
-      await sendManualKey(key,"down");
+      await sendManualKey(key);
     };
-    button.onpointerup=async ()=>{ await sendManualKey(key,"up"); };
-    button.onpointercancel=async ()=>{ await sendManualKey(key,"up"); };
-    button.onpointerleave=async ()=>{ await sendManualKey(key,"up"); };
   });
   window.addEventListener("keydown", async (event)=>{
     const key=event.key.toLowerCase();
-    if(["w","a","s","d","shift"].includes(key) && app.state && app.state.patch_mode==="manual_flight"){
+    if(["w","a","s","d"].includes(key) && app.state && app.state.patch_mode==="manual_flight"){
       event.preventDefault();
-      await sendManualKey(key,"down");
+      if(event.repeat){
+        return;
+      }
+      await sendManualKey(key);
     }
-  });
-  window.addEventListener("keyup", async (event)=>{
-    const key=event.key.toLowerCase();
-    if(["w","a","s","d","shift"].includes(key) && app.state && app.state.patch_mode==="manual_flight"){
-      event.preventDefault();
-      await sendManualKey(key,"up");
-    }
-  });
-  window.addEventListener("blur", async ()=>{
-    await releaseAllManualKeys();
   });
 }
 
@@ -625,7 +569,6 @@ async function saveSettings(){
 
 async function boot(){
   bindStaticActions();
-  ensureManualStatePolling();
   await refreshState();
   await refreshSettings();
   await reloadSources();

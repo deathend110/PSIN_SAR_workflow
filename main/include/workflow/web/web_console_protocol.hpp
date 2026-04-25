@@ -36,16 +36,15 @@ namespace workflow::web
         bool configured = false;
         bool active = false;
         bool paused = false;
+        bool edge_blocked = false;
         int position_x = 0;
         int position_y = 0;
-        int velocity_x = 0;
-        int velocity_y = 0;
-        int requested_center_x = 0;
-        int requested_center_y = 0;
         int last_inferred_center_x = 0;
         int last_inferred_center_y = 0;
         int path_points = 0;
-        std::string active_keys;
+        int patch_count = 0;
+        std::string current_direction;
+        std::string pending_direction;
     };
 
     std::string ToString(shared::ControlState state);

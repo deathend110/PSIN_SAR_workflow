@@ -26,7 +26,7 @@
 Web 控制台负责：
 
 - 可选择是1.RD成像还是2.模型推理模式
-- 可选择1.自动蛇形patch模型，2.手动操控的无人机模拟飞行模式，支持上下左右wasd（无人机模式实现依然留空）
+- 可选择1.自动蛇形patch模型，2.低自由度方向控制的 `manual_flight` 扫描游标模式，支持 `W/A/S/D` 改方向
 - 自动蛇形patch模式：start / pause / stop / reset
 - 可选择1.HDMI 显示模式，2.png保存模式
 - 可自由选择底图：列出可选底图并点击加载
@@ -59,25 +59,65 @@ server:
 
 
 
-**第四阶段：实现无人机模式**
+**第四阶段：重设计 `manual_flight` 为低自由度扫描游标模式**
 
-- wasd控制无人机上下左右
-- 你分析一下无人机模拟模块应该和推理一个线程还是应该分开，并入HDMI UI线程
-- 无人机模式参数要匹配以及定义的web console接口。
-- （可选）若可在不影响整题工作流输出FPS下，可以设计一个简单的加速度和速度系统，模拟实际无人机飞行的加速减速惯性。
+目标不是继续做“自由飞行”的无人机模拟，而是把 `manual_flight` 收敛成一个和 patch 推理节拍严格对齐的扫描游标模式，优先保证：
 
-你思考并给出一个合理的设计
+- 操作语义简单
+- HDMI 输出稳定
+- 推理节拍可预测
+- 不再出现“按一下方向却持续滑行”或“要等一会才来一帧”的体感
 
-当前实现补充说明：
+新的目标语义如下：
 
-- `manual_flight` 已经接通 Web Console、controller 和 infer 主链，不再只是保留接口。
-- Web 端当前支持 `W/A/S/D` 键盘控制，并支持 `keydown/keyup`；保留按钮也会发送相同接口。
-- 当前 manual 模式使用“图像平面 patch 中心点”作为控制对象，不是三维真实无人机飞控。
-- 当前推理触发不是每次按键都立即 forward，而是当位置变化达到 `flight.trigger_distance_px` 后才生成新的 patch 请求。
-- 当前 patch 请求采用 latest-wins，不会把历史移动路径上的所有 patch 都排队推理。
-- 当前 infer 内部包含一个轻量 simulation thread，用于推进位置、速度、路径和请求中心点；HDMI render thread 仍然只负责显示。
-- `Pause` 会冻结 manual 位置推进；`Stop` 会停止后续 manual 推进和新 patch 触发；`Reset` 会清空路径和 manual 运行态。
-- HDMI / Web 状态区会显示 manual telemetry，例如位置、速度、目标中心点、最近一次推理中心点、活动按键和路径点数量。
-- Web 前端会在 manual 模式活跃时对现有 `/api/state` 做轻量轮询，所以状态栏的 manual telemetry 不再只在 patch 完成时跳变。
-- Web 前端只有在 `/api/manual/key` 成功返回后才更新本地按键状态，避免网络失败或后端拒绝后出现“按键卡死”。
-- manual 模式下 `PATCH / current_index / total_count` 现在按“当前已处理次数”统一，不再出现早期阶段的 `1/0` 这类误导性显示。
+- 起点固定在左上角第一个合法 patch 中心，不再从图像中心开始
+- 默认初始方向为向右
+- 保持恒定移动，不再引入加速度、阻尼、惯性或 `Shift boost`
+- `W/A/S/D` 只表示“切换方向”，不再表示按下/松开状态
+- 同方向重复输入直接忽略，不做重复处理
+- 多次方向输入不排队，只保留最新方向
+- 每完成一个 patch，才推进到下一个 patch 中心
+- 移动步长优先与 `stride` 对齐，不再依赖 `trigger_distance_px` 做位置触发
+- 到边缘后直接停住，不反弹、不滑动、不重复提交同一 patch
+- 若当前方向被边缘阻塞，则等待新的有效方向输入后再继续
+
+线程与执行模型要求：
+
+- 不再使用当前的自由飞行 simulation thread 作为 manual 运动主时钟
+- `manual_flight` 的位置推进与 patch 完成绑定，由 infer worker 主循环推进
+- HDMI render thread 继续只负责显示，不并入 manual 控制逻辑
+- Web server / controller 继续只负责方向输入转发和状态展示
+
+Web Console 接口语义要求：
+
+- 保留 `manual_flight` 模式入口，但语义改为“方向控制的扫描游标”
+- Web 输入只负责发送方向变更命令
+- 若继续沿用 `/api/manual/key`，则内部语义也应收敛为“方向切换命令”，不再依赖 `keydown/keyup` 长按状态
+- `Shift` 不再作为 manual 模式必要控制项
+
+配置收敛要求：
+
+- `path_overlay` 和 `control_bindings` 可以继续保留
+- `boost_step_px` 不再作为新模式的关键参数
+- `trigger_distance_px` 不再作为新模式的 patch 触发条件
+- `cache_grid_px` 若仅服务旧的自由飞行路径采样，可退出主语义
+- manual 模式的推进步长优先复用 `stride`
+
+运行态与状态展示要求：
+
+- `Pause`：暂停在当前 patch 中心，不再推进下一步
+- `Resume`：从当前 patch 中心按当前方向继续
+- `Stop`：停止后续 manual 推进和新 patch 触发
+- `Reset`：回到左上角起点，方向恢复为默认向右，并清空 manual 运行态
+- HDMI / Web 状态区应更关注当前方向、当前位置、边缘阻塞状态和已处理 patch 计数
+
+当前实现与下一步改造关系说明：
+
+- 当前仓库里的 `manual_flight` 已经接通 Web Console、controller 和 infer 主链，不再是保留接口
+- 当前实现已经切换为低自由度扫描游标模型：
+  - 左上角起点
+  - 默认向右
+  - `W/A/S/D` 只改方向
+  - patch 完成后再推进一步
+  - 到边缘停住，等待新的有效方向输入
+- 旧的自由飞行骨架（`keydown/keyup` 长按驱动、速度/阻尼、`trigger_distance_px` 触发、manual simulation thread）已经退出主语义

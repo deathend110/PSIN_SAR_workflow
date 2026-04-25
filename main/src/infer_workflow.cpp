@@ -126,14 +126,13 @@ namespace workflow::infer
             bool manual_active = false;
             int manual_pos_x = 0;
             int manual_pos_y = 0;
-            int manual_vel_x = 0;
-            int manual_vel_y = 0;
-            int manual_target_x = 0;
-            int manual_target_y = 0;
             int manual_last_inferred_x = 0;
             int manual_last_inferred_y = 0;
             int manual_path_points = 0;
-            std::string manual_keys;
+            int manual_patch_count = 0;
+            bool manual_edge_blocked = false;
+            std::string manual_direction;
+            std::string manual_pending_direction;
         };
 
         struct MiniMapContext
@@ -175,17 +174,16 @@ namespace workflow::infer
             int image_width = 0;
             int image_height = 0;
             int patch_size = kExpectedH;
-            cv::Point2f position_px{0.0f, 0.0f};
-            cv::Point2f velocity_px{0.0f, 0.0f};
+            int stride = 256;
+            cv::Point current_center{0, 0};
             cv::Point requested_center{0, 0};
             cv::Point last_inferred_center{0, 0};
             std::uint64_t request_sequence = 0;
             std::uint64_t consumed_sequence = 0;
-            bool key_w = false;
-            bool key_a = false;
-            bool key_s = false;
-            bool key_d = false;
-            bool key_shift = false;
+            bool edge_blocked = false;
+            int patch_count = 0;
+            std::string current_direction = "right";
+            std::string pending_direction = "right";
             std::vector<cv::Point> path_points;
         };
 
@@ -195,57 +193,87 @@ namespace workflow::infer
             return state;
         }
 
-        cv::Point clampManualCenter(const cv::Point2f &point, int image_width, int image_height, int patch_size)
+        cv::Point clampManualCenter(const cv::Point &point, int image_width, int image_height, int patch_size)
         {
             const int half = patch_size / 2;
-            const int x = std::max(half, std::min(static_cast<int>(std::lround(point.x)), image_width - half));
-            const int y = std::max(half, std::min(static_cast<int>(std::lround(point.y)), image_height - half));
+            const int x = std::max(half, std::min(point.x, image_width - half));
+            const int y = std::max(half, std::min(point.y, image_height - half));
             return cv::Point(x, y);
         }
 
-        double pointDistance(const cv::Point &lhs, const cv::Point &rhs)
+        bool isManualDirection(const std::string &value)
         {
-            return cv::norm(cv::Point2f(static_cast<float>(lhs.x - rhs.x), static_cast<float>(lhs.y - rhs.y)));
+            return value == "up" || value == "left" || value == "down" || value == "right";
         }
 
-        std::string buildActiveKeysLabel(const ManualFlightSharedState &state)
+        std::string normalizeManualDirectionKey(const std::string &key)
         {
-            std::vector<std::string> keys;
-            if (state.key_w)
+            const std::string lowered = shared::ToLower(shared::Trim(key));
+            if (lowered == "w")
             {
-                keys.push_back("W");
+                return "up";
             }
-            if (state.key_a)
+            if (lowered == "a")
             {
-                keys.push_back("A");
+                return "left";
             }
-            if (state.key_s)
+            if (lowered == "s")
             {
-                keys.push_back("S");
+                return "down";
             }
-            if (state.key_d)
+            if (lowered == "d")
             {
-                keys.push_back("D");
+                return "right";
             }
-            if (state.key_shift)
+            return {};
+        }
+
+        cv::Point manualDirectionDelta(const std::string &direction)
+        {
+            if (direction == "up")
             {
-                keys.push_back("SHIFT");
+                return cv::Point(0, -1);
             }
-            if (keys.empty())
+            if (direction == "left")
             {
-                return "-";
+                return cv::Point(-1, 0);
+            }
+            if (direction == "down")
+            {
+                return cv::Point(0, 1);
+            }
+            return cv::Point(1, 0);
+        }
+
+        cv::Point computeNextManualCenter(const ManualFlightSharedState &state, const std::string &direction)
+        {
+            const cv::Point delta = manualDirectionDelta(direction);
+            return clampManualCenter(cv::Point(state.current_center.x + delta.x * std::max(1, state.stride),
+                                               state.current_center.y + delta.y * std::max(1, state.stride)),
+                                     state.image_width,
+                                     state.image_height,
+                                     state.patch_size);
+        }
+
+        void trimManualPath(std::vector<cv::Point> &path_points);
+
+        bool queueNextManualPatchLocked(ManualFlightSharedState &state)
+        {
+            state.current_direction = state.pending_direction;
+            const cv::Point next_center = computeNextManualCenter(state, state.current_direction);
+            if (next_center == state.current_center)
+            {
+                state.edge_blocked = true;
+                return false;
             }
 
-            std::ostringstream oss;
-            for (size_t i = 0; i < keys.size(); ++i)
-            {
-                if (i > 0)
-                {
-                    oss << "+";
-                }
-                oss << keys[i];
-            }
-            return oss.str();
+            state.edge_blocked = false;
+            state.current_center = next_center;
+            state.requested_center = next_center;
+            state.path_points.push_back(next_center);
+            trimManualPath(state.path_points);
+            ++state.request_sequence;
+            return true;
         }
 
         void trimManualPath(std::vector<cv::Point> &path_points)
@@ -318,22 +346,22 @@ namespace workflow::infer
         auto &manual_shared = manualFlightSharedState();
         {
             std::lock_guard<std::mutex> lock(manual_shared.mutex);
+            const cv::Point reset_center(kExpectedH / 2, kExpectedH / 2);
             manual_shared.active = false;
             manual_shared.paused = false;
             manual_shared.image_width = 0;
             manual_shared.image_height = 0;
             manual_shared.patch_size = kExpectedH;
-            manual_shared.position_px = cv::Point2f(0.0f, 0.0f);
-            manual_shared.velocity_px = cv::Point2f(0.0f, 0.0f);
-            manual_shared.requested_center = cv::Point(0, 0);
-            manual_shared.last_inferred_center = cv::Point(0, 0);
+            manual_shared.stride = 256;
+            manual_shared.current_center = reset_center;
+            manual_shared.requested_center = reset_center;
+            manual_shared.last_inferred_center = reset_center;
             manual_shared.request_sequence = 0;
             manual_shared.consumed_sequence = 0;
-            manual_shared.key_w = false;
-            manual_shared.key_a = false;
-            manual_shared.key_s = false;
-            manual_shared.key_d = false;
-            manual_shared.key_shift = false;
+            manual_shared.edge_blocked = false;
+            manual_shared.patch_count = 0;
+            manual_shared.current_direction = "right";
+            manual_shared.pending_direction = "right";
             manual_shared.path_points.clear();
         }
         manual_shared.cv.notify_all();
@@ -345,9 +373,11 @@ namespace workflow::infer
         {
             std::lock_guard<std::mutex> lock(manual_shared.mutex);
             manual_shared.paused = paused;
-            if (paused)
+            if (!paused &&
+                manual_shared.active &&
+                manual_shared.request_sequence <= manual_shared.consumed_sequence)
             {
-                manual_shared.velocity_px = cv::Point2f(0.0f, 0.0f);
+                queueNextManualPatchLocked(manual_shared);
             }
         }
         manual_shared.cv.notify_all();
@@ -356,11 +386,7 @@ namespace workflow::infer
     bool SubmitManualFlightKey(const std::string &key, bool pressed, std::string *message)
     {
         auto &manual_shared = manualFlightSharedState();
-        const std::string lowered = shared::ToLower(shared::Trim(key));
-        auto set_key = [&](bool &slot) {
-            slot = pressed;
-            return true;
-        };
+        const std::string direction = normalizeManualDirectionKey(key);
 
         std::lock_guard<std::mutex> lock(manual_shared.mutex);
         if (!manual_shared.active)
@@ -372,40 +398,45 @@ namespace workflow::infer
             return false;
         }
 
-        bool accepted = false;
-        if (lowered == "w")
-        {
-            accepted = set_key(manual_shared.key_w);
-        }
-        else if (lowered == "a")
-        {
-            accepted = set_key(manual_shared.key_a);
-        }
-        else if (lowered == "s")
-        {
-            accepted = set_key(manual_shared.key_s);
-        }
-        else if (lowered == "d")
-        {
-            accepted = set_key(manual_shared.key_d);
-        }
-        else if (lowered == "shift")
-        {
-            accepted = set_key(manual_shared.key_shift);
-        }
-
-        if (!accepted)
+        if (!pressed)
         {
             if (message != nullptr)
             {
-                *message = "manual_flight only accepts W/A/S/D and optional Shift.";
+                *message = "manual direction release ignored in cursor mode.";
+            }
+            return true;
+        }
+
+        if (!isManualDirection(direction))
+        {
+            if (message != nullptr)
+            {
+                *message = "manual_flight only accepts W/A/S/D direction changes.";
             }
             return false;
         }
 
+        if (manual_shared.pending_direction == direction)
+        {
+            if (message != nullptr)
+            {
+                *message = "manual direction unchanged.";
+            }
+            return true;
+        }
+
+        manual_shared.pending_direction = direction;
+
+        if (manual_shared.edge_blocked &&
+            !manual_shared.paused &&
+            manual_shared.request_sequence <= manual_shared.consumed_sequence)
+        {
+            queueNextManualPatchLocked(manual_shared);
+        }
+
         if (message != nullptr)
         {
-            *message = std::string("manual key ") + lowered + (pressed ? " down accepted." : " up accepted.");
+            *message = "manual direction set to " + direction + ".";
         }
         manual_shared.cv.notify_all();
         return true;
@@ -421,16 +452,15 @@ namespace workflow::infer
         telemetry.active = manual_shared.active;
         telemetry.paused = manual_shared.paused;
         telemetry.path_overlay = manual_shared.settings.path_overlay;
-        telemetry.position_x = static_cast<int>(std::lround(manual_shared.position_px.x));
-        telemetry.position_y = static_cast<int>(std::lround(manual_shared.position_px.y));
-        telemetry.velocity_x = static_cast<int>(std::lround(manual_shared.velocity_px.x));
-        telemetry.velocity_y = static_cast<int>(std::lround(manual_shared.velocity_px.y));
-        telemetry.requested_center_x = manual_shared.requested_center.x;
-        telemetry.requested_center_y = manual_shared.requested_center.y;
+        telemetry.edge_blocked = manual_shared.edge_blocked;
+        telemetry.position_x = manual_shared.current_center.x;
+        telemetry.position_y = manual_shared.current_center.y;
         telemetry.last_inferred_center_x = manual_shared.last_inferred_center.x;
         telemetry.last_inferred_center_y = manual_shared.last_inferred_center.y;
         telemetry.path_points = static_cast<int>(manual_shared.path_points.size());
-        telemetry.active_keys = buildActiveKeysLabel(manual_shared);
+        telemetry.patch_count = manual_shared.patch_count;
+        telemetry.current_direction = manual_shared.current_direction;
+        telemetry.pending_direction = manual_shared.pending_direction;
         return telemetry;
     }
 
@@ -879,21 +909,19 @@ namespace workflow::infer
     class ManualFlightRuntime
     {
     public:
-        ManualFlightRuntime(cv::Mat image_norm, int patch_size)
-            : image_norm_(std::move(image_norm)), patch_size_(patch_size)
+        ManualFlightRuntime(cv::Mat image_norm, int patch_size, int stride)
+            : image_norm_(std::move(image_norm)), patch_size_(patch_size), stride_(std::max(1, stride))
         {
             if (image_norm_.cols < patch_size_ || image_norm_.rows < patch_size_)
             {
                 throw std::runtime_error("ManualFlightRuntime image is smaller than patch size.");
             }
             initializeSharedState();
-            simulation_thread_ = std::thread(&ManualFlightRuntime::simulationMain, this);
         }
 
         ~ManualFlightRuntime()
         {
             requestStop();
-            join();
             ResetManualFlight();
         }
 
@@ -933,7 +961,15 @@ namespace workflow::infer
             const cv::Point center(packet.info.x + packet.info.width / 2, packet.info.y + packet.info.height / 2);
             {
                 std::lock_guard<std::mutex> lock(shared.mutex);
+                shared.current_center = center;
                 shared.last_inferred_center = center;
+                ++shared.patch_count;
+                if (stop_requested_ || !shared.active || shared.paused)
+                {
+                    return;
+                }
+
+                queueNextManualPatchLocked(shared);
             }
             shared.cv.notify_all();
         }
@@ -944,20 +980,11 @@ namespace workflow::infer
             manualFlightSharedState().cv.notify_all();
         }
 
-        void join()
-        {
-            if (simulation_thread_.joinable())
-            {
-                simulation_thread_.join();
-            }
-        }
-
     private:
         void initializeSharedState()
         {
             auto &shared = manualFlightSharedState();
-            const cv::Point initial_center = clampManualCenter(cv::Point2f(static_cast<float>(image_norm_.cols / 2),
-                                                                           static_cast<float>(image_norm_.rows / 2)),
+            const cv::Point initial_center = clampManualCenter(cv::Point(patch_size_ / 2, patch_size_ / 2),
                                                                image_norm_.cols,
                                                                image_norm_.rows,
                                                                patch_size_);
@@ -967,17 +994,16 @@ namespace workflow::infer
             shared.image_width = image_norm_.cols;
             shared.image_height = image_norm_.rows;
             shared.patch_size = patch_size_;
-            shared.position_px = cv::Point2f(static_cast<float>(initial_center.x), static_cast<float>(initial_center.y));
-            shared.velocity_px = cv::Point2f(0.0f, 0.0f);
+            shared.stride = stride_;
+            shared.current_center = initial_center;
             shared.requested_center = initial_center;
             shared.last_inferred_center = initial_center;
             shared.request_sequence = 1;
             shared.consumed_sequence = 0;
-            shared.key_w = false;
-            shared.key_a = false;
-            shared.key_s = false;
-            shared.key_d = false;
-            shared.key_shift = false;
+            shared.edge_blocked = false;
+            shared.patch_count = 0;
+            shared.current_direction = "right";
+            shared.pending_direction = "right";
             shared.path_points.clear();
             shared.path_points.push_back(initial_center);
         }
@@ -998,101 +1024,10 @@ namespace workflow::infer
             return packet;
         }
 
-        void simulationMain()
-        {
-            auto &shared = manualFlightSharedState();
-            auto last_tick = std::chrono::steady_clock::now();
-
-            while (!stop_requested_)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(16));
-                const auto now = std::chrono::steady_clock::now();
-                const double dt = std::min(0.10, std::chrono::duration<double>(now - last_tick).count());
-                last_tick = now;
-
-                std::lock_guard<std::mutex> lock(shared.mutex);
-                if (!shared.active || shared.paused)
-                {
-                    shared.velocity_px = cv::Point2f(0.0f, 0.0f);
-                    continue;
-                }
-
-                const int horizontal = (shared.key_d ? 1 : 0) - (shared.key_a ? 1 : 0);
-                const int vertical = (shared.key_s ? 1 : 0) - (shared.key_w ? 1 : 0);
-
-                cv::Point2f direction(0.0f, 0.0f);
-                if (horizontal != 0 || vertical != 0)
-                {
-                    direction.x = static_cast<float>(horizontal);
-                    direction.y = static_cast<float>(vertical);
-                    const float magnitude = std::sqrt(direction.x * direction.x + direction.y * direction.y);
-                    if (magnitude > 0.0f)
-                    {
-                        direction.x /= magnitude;
-                        direction.y /= magnitude;
-                    }
-                }
-
-                const double max_speed = static_cast<double>(std::max(1, shared.key_shift ? shared.settings.boost_step_px : shared.settings.manual_step_px));
-                const double acceleration = max_speed * 6.0;
-                if (direction.x != 0.0f || direction.y != 0.0f)
-                {
-                    shared.velocity_px.x += static_cast<float>(direction.x * acceleration * dt);
-                    shared.velocity_px.y += static_cast<float>(direction.y * acceleration * dt);
-                    const double velocity_norm = std::sqrt(shared.velocity_px.x * shared.velocity_px.x +
-                                                           shared.velocity_px.y * shared.velocity_px.y);
-                    if (velocity_norm > max_speed && velocity_norm > 0.0)
-                    {
-                        const double scale = max_speed / velocity_norm;
-                        shared.velocity_px.x = static_cast<float>(shared.velocity_px.x * scale);
-                        shared.velocity_px.y = static_cast<float>(shared.velocity_px.y * scale);
-                    }
-                }
-                else
-                {
-                    const double damping = std::exp(-5.0 * dt);
-                    shared.velocity_px.x = static_cast<float>(shared.velocity_px.x * damping);
-                    shared.velocity_px.y = static_cast<float>(shared.velocity_px.y * damping);
-                    if (std::abs(shared.velocity_px.x) < 0.5f)
-                    {
-                        shared.velocity_px.x = 0.0f;
-                    }
-                    if (std::abs(shared.velocity_px.y) < 0.5f)
-                    {
-                        shared.velocity_px.y = 0.0f;
-                    }
-                }
-
-                shared.position_px.x += static_cast<float>(shared.velocity_px.x * dt);
-                shared.position_px.y += static_cast<float>(shared.velocity_px.y * dt);
-
-                const cv::Point clamped_center = clampManualCenter(shared.position_px,
-                                                                   shared.image_width,
-                                                                   shared.image_height,
-                                                                   shared.patch_size);
-                shared.position_px = cv::Point2f(static_cast<float>(clamped_center.x), static_cast<float>(clamped_center.y));
-
-                const int path_step = std::max(1, shared.settings.cache_grid_px / 2);
-                if (shared.path_points.empty() || pointDistance(shared.path_points.back(), clamped_center) >= path_step)
-                {
-                    shared.path_points.push_back(clamped_center);
-                    trimManualPath(shared.path_points);
-                }
-
-                const int trigger_distance = std::max(1, shared.settings.trigger_distance_px);
-                if (pointDistance(shared.requested_center, clamped_center) >= trigger_distance)
-                {
-                    shared.requested_center = clamped_center;
-                    ++shared.request_sequence;
-                    shared.cv.notify_all();
-                }
-            }
-        }
-
         cv::Mat image_norm_;
         int patch_size_ = 512;
+        int stride_ = 256;
         bool stop_requested_ = false;
-        std::thread simulation_thread_;
     };
 
     Network loadNetwork(const std::string &json_path, const std::string &raw_path)
@@ -1517,16 +1452,15 @@ namespace workflow::infer
         state.manual_active = true;
         state.manual_pos_x = telemetry.position_x;
         state.manual_pos_y = telemetry.position_y;
-        state.manual_vel_x = telemetry.velocity_x;
-        state.manual_vel_y = telemetry.velocity_y;
-        state.manual_target_x = telemetry.requested_center_x;
-        state.manual_target_y = telemetry.requested_center_y;
         state.manual_last_inferred_x = telemetry.last_inferred_center_x;
         state.manual_last_inferred_y = telemetry.last_inferred_center_y;
         state.manual_path_points = telemetry.path_points;
-        state.manual_keys = telemetry.active_keys;
-        ui_context.mode_label = "MANUAL FLIGHT";
-        ui_context.status_label = telemetry.paused ? "PAUSED" : "RUNNING";
+        state.manual_patch_count = telemetry.patch_count;
+        state.manual_edge_blocked = telemetry.edge_blocked;
+        state.manual_direction = telemetry.current_direction;
+        state.manual_pending_direction = telemetry.pending_direction;
+        ui_context.mode_label = "MANUAL CURSOR";
+        ui_context.status_label = telemetry.paused ? "PAUSED" : (telemetry.edge_blocked ? "EDGE HOLD" : "RUNNING");
         ui_context.mini_map.path_overlay = telemetry.path_overlay;
 
         auto &shared = manualFlightSharedState();
@@ -1855,10 +1789,11 @@ namespace workflow::infer
         if (state.manual_active)
         {
             telemetry_metrics.push_back({"POS_XY", std::to_string(state.manual_pos_x) + ", " + std::to_string(state.manual_pos_y)});
-            telemetry_metrics.push_back({"VEL_XY", std::to_string(state.manual_vel_x) + ", " + std::to_string(state.manual_vel_y)});
-            telemetry_metrics.push_back({"TARGET_XY", std::to_string(state.manual_target_x) + ", " + std::to_string(state.manual_target_y)});
+            telemetry_metrics.push_back({"DIR", state.manual_direction.empty() ? "-" : state.manual_direction});
+            telemetry_metrics.push_back({"NEXT_DIR", state.manual_pending_direction.empty() ? "-" : state.manual_pending_direction});
+            telemetry_metrics.push_back({"EDGE_BLOCK", state.manual_edge_blocked ? "true" : "false"});
             telemetry_metrics.push_back({"LAST_XY", std::to_string(state.manual_last_inferred_x) + ", " + std::to_string(state.manual_last_inferred_y)});
-            telemetry_metrics.push_back({"KEYS", state.manual_keys});
+            telemetry_metrics.push_back({"PATCH_COUNT", std::to_string(state.manual_patch_count)});
             telemetry_metrics.push_back({"PATH_POINTS", std::to_string(state.manual_path_points)});
         }
         drawMetricRows(canvas,
@@ -2604,7 +2539,7 @@ int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
 
             if (patch_mode == shared::SelectedPatchMode::ManualFlight)
             {
-                ManualFlightRuntime manual_runtime(sar_norm, cfg.patch_size);
+                ManualFlightRuntime manual_runtime(sar_norm, cfg.patch_size, cfg.stride);
                 base_state.patch_count = 0;
                 base_state.stride = cfg.stride;
 
