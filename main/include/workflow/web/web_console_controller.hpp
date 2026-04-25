@@ -1,5 +1,6 @@
 #pragma once
 
+#include "workflow/infer/infer_workflow.hpp"
 #include "workflow/infer/infer_config.hpp"
 #include "workflow/rd/rd_config.hpp"
 #include "workflow/shared/run_control.hpp"
@@ -33,6 +34,7 @@ namespace workflow::web
         infer::AppConfig inferConfig() const;
         rd::AppConfig rdConfig() const;
         FlightSettings flightSettings() const;
+        ManualFlightTelemetry manualTelemetry() const;
 
         std::vector<SourceInfo> listSources(shared::SelectedWorkflow workflow) const;
         std::optional<std::filesystem::path> resolveInferPreviewPath(const std::string &id) const;
@@ -79,6 +81,7 @@ namespace workflow::web
         void restoreLastAppliedLocked();
         std::vector<SourceInfo> listInferSourcesLocked() const;
         std::vector<SourceInfo> listRdSourcesLocked() const;
+        static infer::ManualFlightSettings toInferManualSettings(const FlightSettings &settings);
 
         mutable std::mutex mutex_;
         infer::AppConfig infer_cfg_;

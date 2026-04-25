@@ -386,7 +386,7 @@ namespace workflow::web
             {
                 sendString(client_fd, makeHttpResponse("200 OK",
                                                        "application/json; charset=utf-8",
-                                                       MakeStateResponse(controller_.snapshot())));
+                                                       MakeStateResponse(controller_.snapshot(), controller_.manualTelemetry())));
             }
             else if (request.method == "GET" && request.path == "/api/settings")
             {
@@ -523,7 +523,7 @@ namespace workflow::web
             return false;
         }
 
-        if (!sendSseFrame(client, std::string("event: state\ndata: ") + MakeStateResponse(controller_.snapshot()) + "\n\n"))
+        if (!sendSseFrame(client, std::string("event: state\ndata: ") + MakeStateResponse(controller_.snapshot(), controller_.manualTelemetry()) + "\n\n"))
         {
             return false;
         }

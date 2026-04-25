@@ -380,3 +380,57 @@ main/configs/
 - Web UI 右上角已经有黄色圆形 shutdown 按钮
 - 黄色 manual_flight 常驻提示条已经删除
 - `stop` 与 `shutdown_web` 是两个不同语义
+
+---
+
+## 11. Phase 4 Manual Flight Map
+
+### New control chain
+
+```text
+browser keydown/keyup
+ -> POST /api/manual/key
+ -> WebConsoleServer::handleClient
+ -> WebConsoleController::commandManualKey
+ -> workflow::infer::SubmitManualFlightKey
+ -> ManualFlightRuntime shared state
+```
+
+### New infer chain
+
+```text
+workflow::infer::Run(..., manual_flight)
+ -> loadSarImageNorm
+ -> ManualFlightRuntime
+    -> simulation thread updates position / velocity / requested_center
+    -> request_sequence / consumed_sequence implements latest-wins
+ -> waitNextPatch(packet)
+ -> PatchTensorBuilder::build
+ -> PatchInferenceRunner::forward
+ -> applyManualTelemetry
+ -> composeIndustrialUiFrame
+ -> HDMI / PNG output
+```
+
+### New core types
+
+- `workflow::infer::ManualFlightSettings`: infer 侧 manual 参数快照。
+- `workflow::infer::ManualFlightTelemetry`: infer 向 Web / UI 暴露的位置、速度、请求中心点与按键状态。
+- `workflow::infer::ManualFlightRuntime`: infer 内部 manual 运行态，负责位置推进、轨迹、latest-wins patch 请求。
+
+### Web-visible state additions
+
+- `manual.active`
+- `manual.paused`
+- `manual.position_x / manual.position_y`
+- `manual.velocity_x / manual.velocity_y`
+- `manual.requested_center_x / manual.requested_center_y`
+- `manual.last_inferred_center_x / manual.last_inferred_center_y`
+- `manual.path_points`
+- `manual.active_keys`
+
+### Phase 4 Fix1 adjustments
+
+- 前端 `sendManualKey(...)` 现在采用“请求成功后再提交本地按键集合”的顺序。
+- 前端在 manual 活跃时会对现有 `/api/state` 做低频轮询，以补足 SSE 只在命令/patch 事件时更新的空窗。
+- manual 模式下 `patch_count` 会在进入 `processPatchToPng / processPatchToHdmi` 前先写成当前已处理计数，保证 UI、日志和 snapshot 语义一致。

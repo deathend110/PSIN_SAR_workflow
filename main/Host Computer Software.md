@@ -63,6 +63,21 @@ server:
 
 - wasd控制无人机上下左右
 - 你分析一下无人机模拟模块应该和推理一个线程还是应该分开，并入HDMI UI线程
+- 无人机模式参数要匹配以及定义的web console接口。
 - （可选）若可在不影响整题工作流输出FPS下，可以设计一个简单的加速度和速度系统，模拟实际无人机飞行的加速减速惯性。
 
+你思考并给出一个合理的设计
 
+当前实现补充说明：
+
+- `manual_flight` 已经接通 Web Console、controller 和 infer 主链，不再只是保留接口。
+- Web 端当前支持 `W/A/S/D` 键盘控制，并支持 `keydown/keyup`；保留按钮也会发送相同接口。
+- 当前 manual 模式使用“图像平面 patch 中心点”作为控制对象，不是三维真实无人机飞控。
+- 当前推理触发不是每次按键都立即 forward，而是当位置变化达到 `flight.trigger_distance_px` 后才生成新的 patch 请求。
+- 当前 patch 请求采用 latest-wins，不会把历史移动路径上的所有 patch 都排队推理。
+- 当前 infer 内部包含一个轻量 simulation thread，用于推进位置、速度、路径和请求中心点；HDMI render thread 仍然只负责显示。
+- `Pause` 会冻结 manual 位置推进；`Stop` 会停止后续 manual 推进和新 patch 触发；`Reset` 会清空路径和 manual 运行态。
+- HDMI / Web 状态区会显示 manual telemetry，例如位置、速度、目标中心点、最近一次推理中心点、活动按键和路径点数量。
+- Web 前端会在 manual 模式活跃时对现有 `/api/state` 做轻量轮询，所以状态栏的 manual telemetry 不再只在 patch 完成时跳变。
+- Web 前端只有在 `/api/manual/key` 成功返回后才更新本地按键状态，避免网络失败或后端拒绝后出现“按键卡死”。
+- manual 模式下 `PATCH / current_index / total_count` 现在按“当前已处理次数”统一，不再出现早期阶段的 `1/0` 这类误导性显示。

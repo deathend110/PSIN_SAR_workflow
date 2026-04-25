@@ -351,3 +351,16 @@ Web 前端当前真实行为：
 - `server.bind` 只是监听地址
 - 当前仓库已经支持把 infer/rd/web 配置写回 YAML
 - 当前模板文档以后续变更应继续以代码为准，而不是以历史 task 文档为准
+
+---
+
+## 14. Phase 4 Manual Flight
+
+- `manual_flight` 已接入真实执行链路，不再只是保留按钮和占位错误。
+- 当前控制路径为：browser `keydown/keyup` -> `POST /api/manual/key` -> `WebConsoleController::commandManualKey(...)` -> `workflow::infer::SubmitManualFlightKey(...)` -> infer 内部 manual runtime -> latest-wins patch 推理 -> HDMI / PNG 输出。
+- 当前线程职责为：Web server 只接收输入并转发；infer 内部 simulation thread 只推进位置、速度和请求中心点；infer worker thread 只消费最新 patch 请求并执行推理；HDMI render thread 仍然只负责显示。
+- `manual_flight` 当前采用“图像平面 patch 中心点”模型，不涉及真实三维飞控。
+- latest-wins 由 `request_sequence / consumed_sequence` 实现，明确避免历史 patch 排队。
+- `flight.*` 已正式参与行为：`manual_step_px` / `boost_step_px` 对应速度上限参考值，`trigger_distance_px` 对应新 patch 触发阈值，`cache_grid_px` 对应路径采样 / 缓存网格参考值，`path_overlay` 控制 HDMI/UI 轨迹叠加，`control_bindings` 当前仍以 `W/A/S/D` 为主。
+- Web 前端对 manual telemetry 额外使用现有 `GET /api/state` 做轻量轮询刷新，只在 `manual_flight + running/paused` 时启用，不新增新协议。
+- Web 前端只有在 `/api/manual/key` 返回成功后才更新本地 `manualKeys`，避免浏览器本地按键状态与板端状态漂移。

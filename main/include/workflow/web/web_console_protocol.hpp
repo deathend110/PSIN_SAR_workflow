@@ -31,6 +31,23 @@ namespace workflow::web
         bool previewable = false;
     };
 
+    struct ManualFlightTelemetry
+    {
+        bool configured = false;
+        bool active = false;
+        bool paused = false;
+        int position_x = 0;
+        int position_y = 0;
+        int velocity_x = 0;
+        int velocity_y = 0;
+        int requested_center_x = 0;
+        int requested_center_y = 0;
+        int last_inferred_center_x = 0;
+        int last_inferred_center_y = 0;
+        int path_points = 0;
+        std::string active_keys;
+    };
+
     std::string ToString(shared::ControlState state);
     std::string ToString(shared::SelectedWorkflow workflow);
     std::string ToString(shared::SelectedPatchMode patch_mode);
@@ -40,7 +57,8 @@ namespace workflow::web
     std::string JsonEscape(const std::string &value);
     std::string MakeOkResponse(const std::string &message = {});
     std::string MakeErrorResponse(const std::string &code, const std::string &message);
-    std::string MakeStateResponse(const shared::WorkflowRuntimeSnapshot &snapshot);
+    std::string MakeStateResponse(const shared::WorkflowRuntimeSnapshot &snapshot,
+                                  const ManualFlightTelemetry &manual_telemetry = {});
     std::string MakeLogEvent(const std::string &message);
     std::string MakeErrorEvent(const std::string &message);
     std::string MakeSettingsResponse(const infer::AppConfig &infer_cfg,

@@ -213,7 +213,7 @@ const flightFields=[
   ["flight.cache_grid_px","cache_grid_px"],["flight.path_overlay","path_overlay"],["flight.control_bindings","control_bindings"]
 ];
 
-const app={ state:null, settings:{}, sources:[], selectedSource:"", eventSource:null, settingsVisible:false, shutdownInProgress:false, connectionClosedNotified:false };
+const app={ state:null, settings:{}, sources:[], selectedSource:"", eventSource:null, settingsVisible:false, shutdownInProgress:false, connectionClosedNotified:false, manualKeys:new Set(), manualStatePollTimer:null, manualStatePollInFlight:false };
 
 function logLine(message){
   const box=document.getElementById("log-box");
@@ -260,6 +260,16 @@ function renderStatus(){
     ["FPS",String(app.state.fps || 0)],
     ["LAST_ERROR",app.state.last_error || "-"]
   ];
+  if(app.state.patch_mode==="manual_flight"){
+    pairs.push(["MANUAL_ACTIVE",String(app.state["manual.active"] || false)]);
+    pairs.push(["MANUAL_PAUSED",String(app.state["manual.paused"] || false)]);
+    pairs.push(["MANUAL_POS",`${app.state["manual.position_x"] || 0}, ${app.state["manual.position_y"] || 0}`]);
+    pairs.push(["MANUAL_VEL",`${app.state["manual.velocity_x"] || 0}, ${app.state["manual.velocity_y"] || 0}`]);
+    pairs.push(["MANUAL_TARGET",`${app.state["manual.requested_center_x"] || 0}, ${app.state["manual.requested_center_y"] || 0}`]);
+    pairs.push(["MANUAL_LAST",`${app.state["manual.last_inferred_center_x"] || 0}, ${app.state["manual.last_inferred_center_y"] || 0}`]);
+    pairs.push(["MANUAL_KEYS",app.state["manual.active_keys"] || "-"]);
+    pairs.push(["MANUAL_PATH",String(app.state["manual.path_points"] || 0)]);
+  }
   const grid=document.getElementById("status-grid");
   grid.innerHTML="";
   pairs.forEach(([k,v])=>{
@@ -340,8 +350,84 @@ function syncShutdownButton(){
   button.title=app.shutdownInProgress ? "Web Console is shutting down" : "Shutdown Web Console";
 }
 
+async function sendManualKey(key, action){
+  const normalizedKey=String(key || "").toLowerCase();
+  if(!["w","a","s","d","shift"].includes(normalizedKey)){
+    return false;
+  }
+  if(!app.state || app.state.patch_mode!=="manual_flight"){
+    return false;
+  }
+  const isPressed=app.manualKeys.has(normalizedKey);
+  if(action==="down"){
+    if(isPressed){
+      return true;
+    }
+  }else if(action==="up"){
+    if(!isPressed){
+      return true;
+    }
+  }else{
+    return false;
+  }
+
+  try{
+    const response=await postJson("/api/manual/key",{key:normalizedKey,action:action});
+    if(!response.ok){
+      logLine(`manual: ${response.message}`);
+      return false;
+    }
+    if(action==="down"){
+      app.manualKeys.add(normalizedKey);
+    }else{
+      app.manualKeys.delete(normalizedKey);
+    }
+    return true;
+  }catch(error){
+    logLine(`manual request failed: ${error.message}`);
+    return false;
+  }
+}
+
+async function releaseAllManualKeys(){
+  const keys=Array.from(app.manualKeys);
+  for(const key of keys){
+    await sendManualKey(key,"up");
+  }
+}
+
+function shouldPollManualState(){
+  return !!(app.state &&
+            app.state.patch_mode==="manual_flight" &&
+            (app.state.control_state==="running" || app.state.control_state==="paused"));
+}
+
+async function pollManualState(){
+  if(!shouldPollManualState() || app.manualStatePollInFlight || app.shutdownInProgress){
+    return;
+  }
+  app.manualStatePollInFlight=true;
+  try{
+    await refreshState();
+  }catch(error){
+    logLine(`manual state poll failed: ${error.message}`);
+  }finally{
+    app.manualStatePollInFlight=false;
+  }
+}
+
+function ensureManualStatePolling(){
+  if(app.manualStatePollTimer){
+    return;
+  }
+  app.manualStatePollTimer=window.setInterval(()=>{ void pollManualState(); }, 250);
+}
+
 function renderAll(){
   if(!app.state){return;}
+  if(app.state.patch_mode!=="manual_flight"){
+    app.manualKeys.clear();
+  }
   renderButtons("workflow-buttons", workflowChoices, app.state.workflow_mode, async (value)=>{
     if(app.state.workflow_mode===value){
       return;
@@ -400,6 +486,9 @@ async function pushSelection(){
 
 async function refreshState(){
   app.state=await getJson("/api/state");
+  if(app.state.patch_mode!=="manual_flight"){
+    app.manualKeys.clear();
+  }
   app.selectedSource=app.state.selected_source || app.selectedSource;
   renderAll();
 }
@@ -437,6 +526,9 @@ function connectEvents(){
   app.eventSource.addEventListener("state",(event)=>{
     app.connectionClosedNotified=false;
     app.state=JSON.parse(event.data);
+    if(app.state.patch_mode!=="manual_flight"){
+      app.manualKeys.clear();
+    }
     app.selectedSource=app.state.selected_source || app.selectedSource;
     renderAll();
   });
@@ -492,17 +584,31 @@ function bindStaticActions(){
   document.getElementById("shutdown-web").onclick=shutdownWebConsole;
   document.getElementById("clear-logs").onclick=()=>{ document.getElementById("log-box").textContent=""; };
   document.querySelectorAll("[data-manual-key]").forEach((button)=>{
-    button.onclick=async ()=>{
-      const response=await postJson("/api/manual/key",{key:button.dataset.manualKey,action:"down"});
-      logLine(`manual: ${response.message}`);
+    const key=button.dataset.manualKey;
+    button.onpointerdown=async (event)=>{
+      event.preventDefault();
+      await sendManualKey(key,"down");
     };
+    button.onpointerup=async ()=>{ await sendManualKey(key,"up"); };
+    button.onpointercancel=async ()=>{ await sendManualKey(key,"up"); };
+    button.onpointerleave=async ()=>{ await sendManualKey(key,"up"); };
   });
   window.addEventListener("keydown", async (event)=>{
     const key=event.key.toLowerCase();
-    if(["w","a","s","d"].includes(key) && app.state && app.state.patch_mode==="manual_flight"){
-      const response=await postJson("/api/manual/key",{key:key,action:"down"});
-      logLine(`manual: ${response.message}`);
+    if(["w","a","s","d","shift"].includes(key) && app.state && app.state.patch_mode==="manual_flight"){
+      event.preventDefault();
+      await sendManualKey(key,"down");
     }
+  });
+  window.addEventListener("keyup", async (event)=>{
+    const key=event.key.toLowerCase();
+    if(["w","a","s","d","shift"].includes(key) && app.state && app.state.patch_mode==="manual_flight"){
+      event.preventDefault();
+      await sendManualKey(key,"up");
+    }
+  });
+  window.addEventListener("blur", async ()=>{
+    await releaseAllManualKeys();
   });
 }
 
@@ -519,6 +625,7 @@ async function saveSettings(){
 
 async function boot(){
   bindStaticActions();
+  ensureManualStatePolling();
   await refreshState();
   await refreshSettings();
   await reloadSources();

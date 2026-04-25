@@ -36,6 +36,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -122,6 +123,17 @@ namespace workflow::infer
             double infer_ms = 0.0;
             double total_ms = 0.0;
             int stride = 256;
+            bool manual_active = false;
+            int manual_pos_x = 0;
+            int manual_pos_y = 0;
+            int manual_vel_x = 0;
+            int manual_vel_y = 0;
+            int manual_target_x = 0;
+            int manual_target_y = 0;
+            int manual_last_inferred_x = 0;
+            int manual_last_inferred_y = 0;
+            int manual_path_points = 0;
+            std::string manual_keys;
         };
 
         struct MiniMapContext
@@ -130,6 +142,8 @@ namespace workflow::infer
             int source_width = 0;
             int source_height = 0;
             int patch_size = 0;
+            bool path_overlay = false;
+            std::vector<cv::Point> path_points;
         };
 
         struct UiRenderContext
@@ -149,6 +163,99 @@ namespace workflow::infer
             cv::Mat restore_bgr;
             cv::Mat mask_bgr;
         };
+
+        struct ManualFlightSharedState
+        {
+            std::mutex mutex;
+            std::condition_variable cv;
+            ManualFlightSettings settings;
+            bool configured = false;
+            bool active = false;
+            bool paused = false;
+            int image_width = 0;
+            int image_height = 0;
+            int patch_size = kExpectedH;
+            cv::Point2f position_px{0.0f, 0.0f};
+            cv::Point2f velocity_px{0.0f, 0.0f};
+            cv::Point requested_center{0, 0};
+            cv::Point last_inferred_center{0, 0};
+            std::uint64_t request_sequence = 0;
+            std::uint64_t consumed_sequence = 0;
+            bool key_w = false;
+            bool key_a = false;
+            bool key_s = false;
+            bool key_d = false;
+            bool key_shift = false;
+            std::vector<cv::Point> path_points;
+        };
+
+        ManualFlightSharedState &manualFlightSharedState()
+        {
+            static ManualFlightSharedState state;
+            return state;
+        }
+
+        cv::Point clampManualCenter(const cv::Point2f &point, int image_width, int image_height, int patch_size)
+        {
+            const int half = patch_size / 2;
+            const int x = std::max(half, std::min(static_cast<int>(std::lround(point.x)), image_width - half));
+            const int y = std::max(half, std::min(static_cast<int>(std::lround(point.y)), image_height - half));
+            return cv::Point(x, y);
+        }
+
+        double pointDistance(const cv::Point &lhs, const cv::Point &rhs)
+        {
+            return cv::norm(cv::Point2f(static_cast<float>(lhs.x - rhs.x), static_cast<float>(lhs.y - rhs.y)));
+        }
+
+        std::string buildActiveKeysLabel(const ManualFlightSharedState &state)
+        {
+            std::vector<std::string> keys;
+            if (state.key_w)
+            {
+                keys.push_back("W");
+            }
+            if (state.key_a)
+            {
+                keys.push_back("A");
+            }
+            if (state.key_s)
+            {
+                keys.push_back("S");
+            }
+            if (state.key_d)
+            {
+                keys.push_back("D");
+            }
+            if (state.key_shift)
+            {
+                keys.push_back("SHIFT");
+            }
+            if (keys.empty())
+            {
+                return "-";
+            }
+
+            std::ostringstream oss;
+            for (size_t i = 0; i < keys.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    oss << "+";
+                }
+                oss << keys[i];
+            }
+            return oss.str();
+        }
+
+        void trimManualPath(std::vector<cv::Point> &path_points)
+        {
+            constexpr size_t kMaxPathPoints = 256;
+            if (path_points.size() > kMaxPathPoints)
+            {
+                path_points.erase(path_points.begin(), path_points.end() - static_cast<std::ptrdiff_t>(kMaxPathPoints));
+            }
+        }
 
         shared::SelectedPatchMode parsePatchMode(const std::string &mode)
         {
@@ -193,6 +300,138 @@ namespace workflow::infer
             snapshot.fps = state.fps;
             control->publish(snapshot);
         }
+    }
+
+    void ConfigureManualFlight(const ManualFlightSettings &settings)
+    {
+        auto &manual_shared = manualFlightSharedState();
+        {
+            std::lock_guard<std::mutex> lock(manual_shared.mutex);
+            manual_shared.settings = settings;
+            manual_shared.configured = true;
+        }
+        manual_shared.cv.notify_all();
+    }
+
+    void ResetManualFlight()
+    {
+        auto &manual_shared = manualFlightSharedState();
+        {
+            std::lock_guard<std::mutex> lock(manual_shared.mutex);
+            manual_shared.active = false;
+            manual_shared.paused = false;
+            manual_shared.image_width = 0;
+            manual_shared.image_height = 0;
+            manual_shared.patch_size = kExpectedH;
+            manual_shared.position_px = cv::Point2f(0.0f, 0.0f);
+            manual_shared.velocity_px = cv::Point2f(0.0f, 0.0f);
+            manual_shared.requested_center = cv::Point(0, 0);
+            manual_shared.last_inferred_center = cv::Point(0, 0);
+            manual_shared.request_sequence = 0;
+            manual_shared.consumed_sequence = 0;
+            manual_shared.key_w = false;
+            manual_shared.key_a = false;
+            manual_shared.key_s = false;
+            manual_shared.key_d = false;
+            manual_shared.key_shift = false;
+            manual_shared.path_points.clear();
+        }
+        manual_shared.cv.notify_all();
+    }
+
+    void SetManualFlightPaused(bool paused)
+    {
+        auto &manual_shared = manualFlightSharedState();
+        {
+            std::lock_guard<std::mutex> lock(manual_shared.mutex);
+            manual_shared.paused = paused;
+            if (paused)
+            {
+                manual_shared.velocity_px = cv::Point2f(0.0f, 0.0f);
+            }
+        }
+        manual_shared.cv.notify_all();
+    }
+
+    bool SubmitManualFlightKey(const std::string &key, bool pressed, std::string *message)
+    {
+        auto &manual_shared = manualFlightSharedState();
+        const std::string lowered = shared::ToLower(shared::Trim(key));
+        auto set_key = [&](bool &slot) {
+            slot = pressed;
+            return true;
+        };
+
+        std::lock_guard<std::mutex> lock(manual_shared.mutex);
+        if (!manual_shared.active)
+        {
+            if (message != nullptr)
+            {
+                *message = "manual_flight is not active.";
+            }
+            return false;
+        }
+
+        bool accepted = false;
+        if (lowered == "w")
+        {
+            accepted = set_key(manual_shared.key_w);
+        }
+        else if (lowered == "a")
+        {
+            accepted = set_key(manual_shared.key_a);
+        }
+        else if (lowered == "s")
+        {
+            accepted = set_key(manual_shared.key_s);
+        }
+        else if (lowered == "d")
+        {
+            accepted = set_key(manual_shared.key_d);
+        }
+        else if (lowered == "shift")
+        {
+            accepted = set_key(manual_shared.key_shift);
+        }
+
+        if (!accepted)
+        {
+            if (message != nullptr)
+            {
+                *message = "manual_flight only accepts W/A/S/D and optional Shift.";
+            }
+            return false;
+        }
+
+        if (message != nullptr)
+        {
+            *message = std::string("manual key ") + lowered + (pressed ? " down accepted." : " up accepted.");
+        }
+        manual_shared.cv.notify_all();
+        return true;
+    }
+
+    ManualFlightTelemetry GetManualFlightTelemetry()
+    {
+        auto &manual_shared = manualFlightSharedState();
+        std::lock_guard<std::mutex> lock(manual_shared.mutex);
+
+        ManualFlightTelemetry telemetry;
+        telemetry.configured = manual_shared.configured;
+        telemetry.active = manual_shared.active;
+        telemetry.paused = manual_shared.paused;
+        telemetry.path_overlay = manual_shared.settings.path_overlay;
+        telemetry.position_x = static_cast<int>(std::lround(manual_shared.position_px.x));
+        telemetry.position_y = static_cast<int>(std::lround(manual_shared.position_px.y));
+        telemetry.velocity_x = static_cast<int>(std::lround(manual_shared.velocity_px.x));
+        telemetry.velocity_y = static_cast<int>(std::lround(manual_shared.velocity_px.y));
+        telemetry.requested_center_x = manual_shared.requested_center.x;
+        telemetry.requested_center_y = manual_shared.requested_center.y;
+        telemetry.last_inferred_center_x = manual_shared.last_inferred_center.x;
+        telemetry.last_inferred_center_y = manual_shared.last_inferred_center.y;
+        telemetry.path_points = static_cast<int>(manual_shared.path_points.size());
+        telemetry.active_keys = buildActiveKeysLabel(manual_shared);
+        return telemetry;
     }
 
     namespace
@@ -637,53 +876,223 @@ namespace workflow::infer
         int cursor_ = 0;
     };
 
-    class ManualFlightPatchSource
+    class ManualFlightRuntime
     {
     public:
-        ManualFlightPatchSource(cv::Mat image_norm, int patch_size)
+        ManualFlightRuntime(cv::Mat image_norm, int patch_size)
             : image_norm_(std::move(image_norm)), patch_size_(patch_size)
         {
             if (image_norm_.cols < patch_size_ || image_norm_.rows < patch_size_)
             {
-                throw std::runtime_error("ManualFlightPatchSource image is smaller than patch size.");
+                throw std::runtime_error("ManualFlightRuntime image is smaller than patch size.");
             }
-            cx_ = image_norm_.cols / 2;
-            cy_ = image_norm_.rows / 2;
-            clampCenter();
+            initializeSharedState();
+            simulation_thread_ = std::thread(&ManualFlightRuntime::simulationMain, this);
         }
 
-        void moveBy(int dx, int dy)
+        ~ManualFlightRuntime()
         {
-            cx_ += dx;
-            cy_ += dy;
-            clampCenter();
+            requestStop();
+            join();
+            ResetManualFlight();
         }
 
-        PatchPacket current() const
+        bool waitNextPatch(PatchPacket &packet, shared::WorkflowRunControl *control, int patch_index)
+        {
+            auto &shared = manualFlightSharedState();
+            for (;;)
+            {
+                std::unique_lock<std::mutex> lock(shared.mutex);
+                shared.cv.wait_for(lock, std::chrono::milliseconds(40), [&] {
+                    return stop_requested_ ||
+                           shared.request_sequence > shared.consumed_sequence ||
+                           (control != nullptr && control->shouldStop());
+                });
+
+                if (stop_requested_ || (control != nullptr && control->shouldStop()))
+                {
+                    return false;
+                }
+                if (shared.request_sequence <= shared.consumed_sequence)
+                {
+                    continue;
+                }
+
+                const cv::Point center = shared.requested_center;
+                shared.consumed_sequence = shared.request_sequence;
+                lock.unlock();
+
+                packet = makePacket(center, patch_index);
+                return true;
+            }
+        }
+
+        void markInferenceCommitted(const PatchPacket &packet)
+        {
+            auto &shared = manualFlightSharedState();
+            const cv::Point center(packet.info.x + packet.info.width / 2, packet.info.y + packet.info.height / 2);
+            {
+                std::lock_guard<std::mutex> lock(shared.mutex);
+                shared.last_inferred_center = center;
+            }
+            shared.cv.notify_all();
+        }
+
+        void requestStop()
+        {
+            stop_requested_ = true;
+            manualFlightSharedState().cv.notify_all();
+        }
+
+        void join()
+        {
+            if (simulation_thread_.joinable())
+            {
+                simulation_thread_.join();
+            }
+        }
+
+    private:
+        void initializeSharedState()
+        {
+            auto &shared = manualFlightSharedState();
+            const cv::Point initial_center = clampManualCenter(cv::Point2f(static_cast<float>(image_norm_.cols / 2),
+                                                                           static_cast<float>(image_norm_.rows / 2)),
+                                                               image_norm_.cols,
+                                                               image_norm_.rows,
+                                                               patch_size_);
+            std::lock_guard<std::mutex> lock(shared.mutex);
+            shared.active = true;
+            shared.paused = false;
+            shared.image_width = image_norm_.cols;
+            shared.image_height = image_norm_.rows;
+            shared.patch_size = patch_size_;
+            shared.position_px = cv::Point2f(static_cast<float>(initial_center.x), static_cast<float>(initial_center.y));
+            shared.velocity_px = cv::Point2f(0.0f, 0.0f);
+            shared.requested_center = initial_center;
+            shared.last_inferred_center = initial_center;
+            shared.request_sequence = 1;
+            shared.consumed_sequence = 0;
+            shared.key_w = false;
+            shared.key_a = false;
+            shared.key_s = false;
+            shared.key_d = false;
+            shared.key_shift = false;
+            shared.path_points.clear();
+            shared.path_points.push_back(initial_center);
+        }
+
+        PatchPacket makePacket(const cv::Point &center, int patch_index) const
         {
             const int half = patch_size_ / 2;
             PatchPacket packet;
-            packet.info.index = 0;
-            packet.info.x = cx_ - half;
-            packet.info.y = cy_ - half;
+            packet.info.index = patch_index;
+            packet.info.grid_row = -1;
+            packet.info.grid_col = -1;
+            packet.info.x = center.x - half;
+            packet.info.y = center.y - half;
             packet.info.width = patch_size_;
             packet.info.height = patch_size_;
+            packet.info.right_to_left = false;
             packet.patch_norm = image_norm_(cv::Rect(packet.info.x, packet.info.y, patch_size_, patch_size_)).clone();
             return packet;
         }
 
-    private:
-        void clampCenter()
+        void simulationMain()
         {
-            const int half = patch_size_ / 2;
-            cx_ = std::max(half, std::min(cx_, image_norm_.cols - half));
-            cy_ = std::max(half, std::min(cy_, image_norm_.rows - half));
+            auto &shared = manualFlightSharedState();
+            auto last_tick = std::chrono::steady_clock::now();
+
+            while (!stop_requested_)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                const auto now = std::chrono::steady_clock::now();
+                const double dt = std::min(0.10, std::chrono::duration<double>(now - last_tick).count());
+                last_tick = now;
+
+                std::lock_guard<std::mutex> lock(shared.mutex);
+                if (!shared.active || shared.paused)
+                {
+                    shared.velocity_px = cv::Point2f(0.0f, 0.0f);
+                    continue;
+                }
+
+                const int horizontal = (shared.key_d ? 1 : 0) - (shared.key_a ? 1 : 0);
+                const int vertical = (shared.key_s ? 1 : 0) - (shared.key_w ? 1 : 0);
+
+                cv::Point2f direction(0.0f, 0.0f);
+                if (horizontal != 0 || vertical != 0)
+                {
+                    direction.x = static_cast<float>(horizontal);
+                    direction.y = static_cast<float>(vertical);
+                    const float magnitude = std::sqrt(direction.x * direction.x + direction.y * direction.y);
+                    if (magnitude > 0.0f)
+                    {
+                        direction.x /= magnitude;
+                        direction.y /= magnitude;
+                    }
+                }
+
+                const double max_speed = static_cast<double>(std::max(1, shared.key_shift ? shared.settings.boost_step_px : shared.settings.manual_step_px));
+                const double acceleration = max_speed * 6.0;
+                if (direction.x != 0.0f || direction.y != 0.0f)
+                {
+                    shared.velocity_px.x += static_cast<float>(direction.x * acceleration * dt);
+                    shared.velocity_px.y += static_cast<float>(direction.y * acceleration * dt);
+                    const double velocity_norm = std::sqrt(shared.velocity_px.x * shared.velocity_px.x +
+                                                           shared.velocity_px.y * shared.velocity_px.y);
+                    if (velocity_norm > max_speed && velocity_norm > 0.0)
+                    {
+                        const double scale = max_speed / velocity_norm;
+                        shared.velocity_px.x = static_cast<float>(shared.velocity_px.x * scale);
+                        shared.velocity_px.y = static_cast<float>(shared.velocity_px.y * scale);
+                    }
+                }
+                else
+                {
+                    const double damping = std::exp(-5.0 * dt);
+                    shared.velocity_px.x = static_cast<float>(shared.velocity_px.x * damping);
+                    shared.velocity_px.y = static_cast<float>(shared.velocity_px.y * damping);
+                    if (std::abs(shared.velocity_px.x) < 0.5f)
+                    {
+                        shared.velocity_px.x = 0.0f;
+                    }
+                    if (std::abs(shared.velocity_px.y) < 0.5f)
+                    {
+                        shared.velocity_px.y = 0.0f;
+                    }
+                }
+
+                shared.position_px.x += static_cast<float>(shared.velocity_px.x * dt);
+                shared.position_px.y += static_cast<float>(shared.velocity_px.y * dt);
+
+                const cv::Point clamped_center = clampManualCenter(shared.position_px,
+                                                                   shared.image_width,
+                                                                   shared.image_height,
+                                                                   shared.patch_size);
+                shared.position_px = cv::Point2f(static_cast<float>(clamped_center.x), static_cast<float>(clamped_center.y));
+
+                const int path_step = std::max(1, shared.settings.cache_grid_px / 2);
+                if (shared.path_points.empty() || pointDistance(shared.path_points.back(), clamped_center) >= path_step)
+                {
+                    shared.path_points.push_back(clamped_center);
+                    trimManualPath(shared.path_points);
+                }
+
+                const int trigger_distance = std::max(1, shared.settings.trigger_distance_px);
+                if (pointDistance(shared.requested_center, clamped_center) >= trigger_distance)
+                {
+                    shared.requested_center = clamped_center;
+                    ++shared.request_sequence;
+                    shared.cv.notify_all();
+                }
+            }
         }
 
         cv::Mat image_norm_;
         int patch_size_ = 512;
-        int cx_ = 0;
-        int cy_ = 0;
+        bool stop_requested_ = false;
+        std::thread simulation_thread_;
     };
 
     Network loadNetwork(const std::string &json_path, const std::string &raw_path)
@@ -1097,6 +1506,34 @@ namespace workflow::infer
         return oss.str();
     }
 
+    void applyManualTelemetry(RuntimeState &state, UiRenderContext &ui_context)
+    {
+        const ManualFlightTelemetry telemetry = GetManualFlightTelemetry();
+        if (!telemetry.active)
+        {
+            return;
+        }
+
+        state.manual_active = true;
+        state.manual_pos_x = telemetry.position_x;
+        state.manual_pos_y = telemetry.position_y;
+        state.manual_vel_x = telemetry.velocity_x;
+        state.manual_vel_y = telemetry.velocity_y;
+        state.manual_target_x = telemetry.requested_center_x;
+        state.manual_target_y = telemetry.requested_center_y;
+        state.manual_last_inferred_x = telemetry.last_inferred_center_x;
+        state.manual_last_inferred_y = telemetry.last_inferred_center_y;
+        state.manual_path_points = telemetry.path_points;
+        state.manual_keys = telemetry.active_keys;
+        ui_context.mode_label = "MANUAL FLIGHT";
+        ui_context.status_label = telemetry.paused ? "PAUSED" : "RUNNING";
+        ui_context.mini_map.path_overlay = telemetry.path_overlay;
+
+        auto &shared = manualFlightSharedState();
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        ui_context.mini_map.path_points = shared.path_points;
+    }
+
     cv::Point mapPointToRect(const cv::Point2f &point, const MiniMapContext &context, const cv::Rect &target_rect)
     {
         const double x_ratio = context.source_width > 0 ? point.x / static_cast<double>(context.source_width) : 0.0;
@@ -1180,10 +1617,25 @@ namespace workflow::infer
 
         const cv::Rect image_rect = drawFittedImage(context.sar_preview_bgr, canvas, insetRect(body_rect, 8, 8), cv::INTER_LINEAR);
 
+        if (context.path_overlay && context.path_points.size() >= 2)
+        {
+            std::vector<cv::Point> path_pixels;
+            path_pixels.reserve(context.path_points.size());
+            for (const auto &point : context.path_points)
+            {
+                path_pixels.push_back(mapPointToRect(cv::Point2f(static_cast<float>(point.x), static_cast<float>(point.y)),
+                                                     context,
+                                                     image_rect));
+            }
+            const cv::Point *points = path_pixels.data();
+            const int point_count = static_cast<int>(path_pixels.size());
+            cv::polylines(canvas, &points, &point_count, 1, false, cv::Scalar(66, 133, 244), std::max(1, body_rect.width / 180), cv::LINE_AA);
+        }
+
         const double scale_x = context.source_width > 0 ? static_cast<double>(image_rect.width) / context.source_width : 1.0;
         const double scale_y = context.source_height > 0 ? static_cast<double>(image_rect.height) / context.source_height : 1.0;
         const cv::Rect patch_rect(image_rect.x + static_cast<int>(std::round(patch.x * scale_x)),
-                                  image_rect.y + static_cast<int>(std::round(patch.y * scale_y)),
+                                 image_rect.y + static_cast<int>(std::round(patch.y * scale_y)),
                                   std::max(1, static_cast<int>(std::round(patch.width * scale_x))),
                                   std::max(1, static_cast<int>(std::round(patch.height * scale_y))));
         cv::rectangle(canvas, patch_rect, patch_color, std::max(2, body_rect.width / 110), cv::LINE_AA);
@@ -1395,13 +1847,23 @@ namespace workflow::infer
             {"PATCH", formatCounter(state.patch.index + 1, state.patch_count)},
             {"FRAME", formatFrameCounter(state.frame_index)},
             {"SAR_NAME", state.sar_stem},
-            {"GRID_RC", std::to_string(state.patch.grid_row) + ", " + std::to_string(state.patch.grid_col)},
+            {"GRID_RC", state.manual_active ? "-" : (std::to_string(state.patch.grid_row) + ", " + std::to_string(state.patch.grid_col))},
             {"FPS", formatFps(state.fps)},
             {"NPU_MS", formatMillis(state.infer_ms)},
             {"TOTAL_MS", formatMillis(state.total_ms)}};
+        std::vector<std::pair<std::string, std::string>> telemetry_metrics = metrics;
+        if (state.manual_active)
+        {
+            telemetry_metrics.push_back({"POS_XY", std::to_string(state.manual_pos_x) + ", " + std::to_string(state.manual_pos_y)});
+            telemetry_metrics.push_back({"VEL_XY", std::to_string(state.manual_vel_x) + ", " + std::to_string(state.manual_vel_y)});
+            telemetry_metrics.push_back({"TARGET_XY", std::to_string(state.manual_target_x) + ", " + std::to_string(state.manual_target_y)});
+            telemetry_metrics.push_back({"LAST_XY", std::to_string(state.manual_last_inferred_x) + ", " + std::to_string(state.manual_last_inferred_y)});
+            telemetry_metrics.push_back({"KEYS", state.manual_keys});
+            telemetry_metrics.push_back({"PATH_POINTS", std::to_string(state.manual_path_points)});
+        }
         drawMetricRows(canvas,
                        telemetry_body,
-                       metrics,
+                       telemetry_metrics,
                        subtitle_color,
                        title_color,
                        divider_color);
@@ -2111,10 +2573,10 @@ int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
                                     cfg.output_wait_ms);
         int frame_counter = 0;
         bool stop_requested = false;
-
-        if (parsePatchMode(cfg.patch_mode) == shared::SelectedPatchMode::ManualFlight)
+        const shared::SelectedPatchMode patch_mode = parsePatchMode(cfg.patch_mode);
+        if (patch_mode == shared::SelectedPatchMode::ManualFlight && sar_files.size() != 1)
         {
-            throw std::runtime_error("manual_flight is reserved for a future phase.");
+            throw std::runtime_error("manual_flight requires exactly one selected SAR image.");
         }
 
         for (size_t sar_idx = 0; sar_idx < sar_files.size(); ++sar_idx)
@@ -2134,64 +2596,126 @@ int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
                 spdlog::warn("Skip {} because SAR image is smaller than 512x512.", base_state.sar_stem);
                 continue;
             }
-            if (cfg.patch_mode != "auto_snake")
-            {
-                throw std::runtime_error("Only pipeline.patch.mode=auto_snake is implemented in stage 0.");
-            }
-
-            SnakePatchSource patch_source(sar_norm, cfg.patch_size, cfg.stride);
-            base_state.patch_count = patch_source.totalPatches();
-            base_state.stride = cfg.stride;
-            spdlog::info("Patch grid for {}: rows={}, cols={}, total={}",
-                         base_state.sar_stem,
-                         patch_source.rows(),
-                         patch_source.cols(),
-                         patch_source.totalPatches());
 
             UiRenderContext ui_context;
             ui_context.output_label = buildOutputLabel(cfg);
-            ui_context.mini_map = buildMiniMapContext(sar_norm, cfg.patch_size, cfg.stride, patch_source.rows(), patch_source.cols());
+            ui_context.mini_map = buildMiniMapContext(sar_norm, cfg.patch_size, cfg.stride, 0, 0);
             publishSnapshot(control, cfg, base_state, "sar loaded", shared::ControlState::Running, sar_path.string());
 
-            PatchPacket packet;
-            while (patch_source.next(packet))
+            if (patch_mode == shared::SelectedPatchMode::ManualFlight)
             {
-                if (control != nullptr)
+                ManualFlightRuntime manual_runtime(sar_norm, cfg.patch_size);
+                base_state.patch_count = 0;
+                base_state.stride = cfg.stride;
+
+                PatchPacket packet;
+                int patch_index = 0;
+                while (manual_runtime.waitNextPatch(packet, control, patch_index))
                 {
-                    control->waitIfPaused();
-                    if (control->shouldStop())
+                    if (control != nullptr)
                     {
-                        publishSnapshot(control, cfg, base_state, "stop requested", shared::ControlState::Stopping, sar_path.string());
-                        stop_requested = true;
-                        break;
+                        control->waitIfPaused();
+                        if (control->shouldStop())
+                        {
+                            publishSnapshot(control, cfg, base_state, "stop requested", shared::ControlState::Stopping, sar_path.string());
+                            stop_requested = true;
+                            break;
+                        }
                     }
+
+                    RuntimeState patch_base_state = base_state;
+                    patch_base_state.patch_count = patch_index + 1;
+                    UiRenderContext patch_ui_context = ui_context;
+                    applyManualTelemetry(patch_base_state, patch_ui_context);
+
+                    RuntimeState patch_state;
+                    if (cfg.output_mode == "hdmi")
+                    {
+                        patch_state = processPatchToHdmi(packet,
+                                                         patch_base_state,
+                                                         patch_ui_context,
+                                                         tensor_builder,
+                                                         runner,
+                                                         device_access_mutex,
+                                                         *hdmi_mailbox,
+                                                         *hdmi_render_worker,
+                                                         frame_counter);
+                    }
+                    else
+                    {
+                        patch_state = processPatchToPng(packet,
+                                                        patch_base_state,
+                                                        patch_ui_context,
+                                                        tensor_builder,
+                                                        runner,
+                                                        *sink,
+                                                        cfg,
+                                                        frame_counter);
+                    }
+                    manual_runtime.markInferenceCommitted(packet);
+                    applyManualTelemetry(patch_state, patch_ui_context);
+                    publishSnapshot(control, cfg, patch_state, "manual patch processed", shared::ControlState::Running, sar_path.string());
+                    base_state = patch_state;
+                    ++patch_index;
+                }
+            }
+            else
+            {
+                SnakePatchSource patch_source(sar_norm, cfg.patch_size, cfg.stride);
+                base_state.patch_count = patch_source.totalPatches();
+                base_state.stride = cfg.stride;
+                spdlog::info("Patch grid for {}: rows={}, cols={}, total={}",
+                             base_state.sar_stem,
+                             patch_source.rows(),
+                             patch_source.cols(),
+                             patch_source.totalPatches());
+                ui_context.mini_map = buildMiniMapContext(sar_norm, cfg.patch_size, cfg.stride, patch_source.rows(), patch_source.cols());
+
+                PatchPacket packet;
+                while (patch_source.next(packet))
+                {
+                    if (control != nullptr)
+                    {
+                        control->waitIfPaused();
+                        if (control->shouldStop())
+                        {
+                            publishSnapshot(control, cfg, base_state, "stop requested", shared::ControlState::Stopping, sar_path.string());
+                            stop_requested = true;
+                            break;
+                        }
+                    }
+
+                    RuntimeState patch_state;
+                    if (cfg.output_mode == "hdmi")
+                    {
+                        patch_state = processPatchToHdmi(packet,
+                                                         base_state,
+                                                         ui_context,
+                                                         tensor_builder,
+                                                         runner,
+                                                         device_access_mutex,
+                                                         *hdmi_mailbox,
+                                                         *hdmi_render_worker,
+                                                         frame_counter);
+                    }
+                    else
+                    {
+                        patch_state = processPatchToPng(packet,
+                                                        base_state,
+                                                        ui_context,
+                                                        tensor_builder,
+                                                        runner,
+                                                        *sink,
+                                                        cfg,
+                                                        frame_counter);
+                    }
+                    publishSnapshot(control, cfg, patch_state, "patch processed", shared::ControlState::Running, sar_path.string());
                 }
 
-                RuntimeState patch_state;
-                if (cfg.output_mode == "hdmi")
+                if (stop_requested)
                 {
-                    patch_state = processPatchToHdmi(packet,
-                                                     base_state,
-                                                     ui_context,
-                                                     tensor_builder,
-                                                     runner,
-                                                     device_access_mutex,
-                                                     *hdmi_mailbox,
-                                                     *hdmi_render_worker,
-                                                     frame_counter);
+                    break;
                 }
-                else
-                {
-                    patch_state = processPatchToPng(packet,
-                                                    base_state,
-                                                    ui_context,
-                                                    tensor_builder,
-                                                    runner,
-                                                    *sink,
-                                                    cfg,
-                                                    frame_counter);
-                }
-                publishSnapshot(control, cfg, patch_state, "patch processed", shared::ControlState::Running, sar_path.string());
             }
 
             if (stop_requested)
@@ -2220,6 +2744,10 @@ int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
                         stop_requested ? "stopped" : "finished",
                         stop_requested ? shared::ControlState::Idle : shared::ControlState::Finished,
                         cfg.sar_img_dir.string());
+        if (patch_mode == shared::SelectedPatchMode::ManualFlight)
+        {
+            ResetManualFlight();
+        }
         return 0;
     }
     catch (const std::exception &e)
@@ -2245,6 +2773,10 @@ int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
             if (device_open)
             {
                 Device::Close(device);
+            }
+            if (parsePatchMode(cfg.patch_mode) == shared::SelectedPatchMode::ManualFlight)
+            {
+                ResetManualFlight();
             }
         }
         catch (...)

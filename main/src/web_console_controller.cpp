@@ -106,6 +106,7 @@ namespace workflow::web
     WebConsoleController::WebConsoleController(infer::AppConfig infer_cfg, rd::AppConfig rd_cfg)
         : infer_cfg_(std::move(infer_cfg)), rd_cfg_(std::move(rd_cfg))
     {
+        infer::ConfigureManualFlight(toInferManualSettings(flight_settings_));
         runtime_snapshot_.state = shared::ControlState::Idle;
         runtime_snapshot_.selection.workflow = shared::SelectedWorkflow::InferOnly;
         runtime_snapshot_.selection.patch_mode = shared::SelectedPatchMode::AutoSnake;
@@ -199,6 +200,26 @@ namespace workflow::web
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return flight_settings_;
+    }
+
+    ManualFlightTelemetry WebConsoleController::manualTelemetry() const
+    {
+        const infer::ManualFlightTelemetry infer_telemetry = infer::GetManualFlightTelemetry();
+        ManualFlightTelemetry telemetry;
+        telemetry.configured = infer_telemetry.configured;
+        telemetry.active = infer_telemetry.active;
+        telemetry.paused = infer_telemetry.paused;
+        telemetry.position_x = infer_telemetry.position_x;
+        telemetry.position_y = infer_telemetry.position_y;
+        telemetry.velocity_x = infer_telemetry.velocity_x;
+        telemetry.velocity_y = infer_telemetry.velocity_y;
+        telemetry.requested_center_x = infer_telemetry.requested_center_x;
+        telemetry.requested_center_y = infer_telemetry.requested_center_y;
+        telemetry.last_inferred_center_x = infer_telemetry.last_inferred_center_x;
+        telemetry.last_inferred_center_y = infer_telemetry.last_inferred_center_y;
+        telemetry.path_points = infer_telemetry.path_points;
+        telemetry.active_keys = infer_telemetry.active_keys;
+        return telemetry;
     }
 
     std::vector<SourceInfo> WebConsoleController::listSources(shared::SelectedWorkflow workflow) const
@@ -538,6 +559,7 @@ namespace workflow::web
                 return MakeErrorResponse("invalid_settings", e.what());
             }
 
+            infer::ConfigureManualFlight(toInferManualSettings(flight_settings_));
             callback = event_callback_;
             queueStateLocked(events);
         }
@@ -554,16 +576,15 @@ namespace workflow::web
         bool resume_requested = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (runtime_snapshot_.selection.patch_mode == shared::SelectedPatchMode::ManualFlight)
-            {
-                return MakeErrorResponse("not_implemented", "manual_flight is reserved for a future phase.");
-            }
-
             if (runtime_snapshot_.state == shared::ControlState::Paused)
             {
                 if (run_control_)
                 {
                     run_control_->requestResume();
+                }
+                if (runtime_snapshot_.selection.patch_mode == shared::SelectedPatchMode::ManualFlight)
+                {
+                    infer::SetManualFlightPaused(false);
                 }
                 runtime_snapshot_.state = shared::ControlState::Running;
                 runtime_snapshot_.last_error.clear();
@@ -613,6 +634,8 @@ namespace workflow::web
                 }
                 infer_cfg.patch_mode = ToString(selection.patch_mode);
                 infer_cfg.output_mode = selection.output_mode;
+                infer::ConfigureManualFlight(toInferManualSettings(flight_settings_));
+                infer::ResetManualFlight();
 
                 worker_active_ = true;
                 worker_ = std::thread(&WebConsoleController::workerMain,
@@ -636,15 +659,15 @@ namespace workflow::web
         std::vector<PendingEvent> events;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (runtime_snapshot_.selection.patch_mode == shared::SelectedPatchMode::ManualFlight)
-            {
-                return MakeErrorResponse("not_implemented", "manual_flight pause is reserved for a future phase.");
-            }
             if (runtime_snapshot_.state != shared::ControlState::Running || !run_control_)
             {
                 return MakeErrorResponse("invalid_state", "Pause is only valid while running.");
             }
             run_control_->requestPause();
+            if (runtime_snapshot_.selection.patch_mode == shared::SelectedPatchMode::ManualFlight)
+            {
+                infer::SetManualFlightPaused(true);
+            }
             runtime_snapshot_.state = shared::ControlState::Paused;
             callback = event_callback_;
             queueStateLocked(events);
@@ -677,6 +700,8 @@ namespace workflow::web
         {
             std::lock_guard<std::mutex> lock(mutex_);
             restoreLastAppliedLocked();
+            infer::ConfigureManualFlight(toInferManualSettings(flight_settings_));
+            infer::ResetManualFlight();
             runtime_snapshot_.state = shared::ControlState::Idle;
             runtime_snapshot_.current_stage = "reset";
             runtime_snapshot_.current_item.clear();
@@ -718,9 +743,63 @@ namespace workflow::web
         return MakeOkResponse("Web Console shutdown requested.");
     }
 
-    std::string WebConsoleController::commandManualKey(const std::unordered_map<std::string, std::string> &)
+    std::string WebConsoleController::commandManualKey(const std::unordered_map<std::string, std::string> &fields)
     {
-        return MakeErrorResponse("not_implemented", "manual_flight controls are reserved for a future phase.");
+        EventCallback callback;
+        std::vector<PendingEvent> events;
+        std::string key;
+        bool pressed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (runtime_snapshot_.selection.workflow != shared::SelectedWorkflow::InferOnly ||
+                runtime_snapshot_.selection.patch_mode != shared::SelectedPatchMode::ManualFlight)
+            {
+                return MakeErrorResponse("invalid_state", "manual_flight input is only valid for infer/manual_flight.");
+            }
+            if (runtime_snapshot_.state != shared::ControlState::Running &&
+                runtime_snapshot_.state != shared::ControlState::Paused)
+            {
+                return MakeErrorResponse("invalid_state", "manual_flight input is only valid while the workflow is active.");
+            }
+
+            const auto key_it = fields.find("key");
+            const auto action_it = fields.find("action");
+            if (key_it == fields.end() || action_it == fields.end())
+            {
+                return MakeErrorResponse("invalid_request", "manual_flight requires key and action.");
+            }
+
+            key = shared::ToLower(shared::Trim(key_it->second));
+            const std::string action = shared::ToLower(shared::Trim(action_it->second));
+            if (action == "down")
+            {
+                pressed = true;
+            }
+            else if (action == "up")
+            {
+                pressed = false;
+            }
+            else
+            {
+                return MakeErrorResponse("invalid_request", "manual_flight action must be down or up.");
+            }
+
+            callback = event_callback_;
+        }
+
+        std::string message;
+        if (!infer::SubmitManualFlightKey(key, pressed, &message))
+        {
+            return MakeErrorResponse("invalid_manual_key", message);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callback = event_callback_;
+            queueStateLocked(events);
+        }
+        dispatchEvents(callback, events);
+        return MakeOkResponse(message);
     }
 
     void WebConsoleController::queueEventLocked(std::vector<PendingEvent> &events,
@@ -732,7 +811,7 @@ namespace workflow::web
 
     void WebConsoleController::queueStateLocked(std::vector<PendingEvent> &events) const
     {
-        queueEventLocked(events, "state", MakeStateResponse(runtime_snapshot_));
+        queueEventLocked(events, "state", MakeStateResponse(runtime_snapshot_, manualTelemetry()));
     }
 
     void WebConsoleController::queueLogLocked(std::vector<PendingEvent> &events, const std::string &message) const
@@ -830,6 +909,11 @@ namespace workflow::web
         callback = EventCallback{};
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (selection.workflow == shared::SelectedWorkflow::InferOnly &&
+                selection.patch_mode == shared::SelectedPatchMode::ManualFlight)
+            {
+                infer::ResetManualFlight();
+            }
             worker_active_ = false;
             if (!error_message.empty())
             {
@@ -926,6 +1010,18 @@ namespace workflow::web
                state == shared::ControlState::Running ||
                state == shared::ControlState::Paused ||
                state == shared::ControlState::Stopping;
+    }
+
+    infer::ManualFlightSettings WebConsoleController::toInferManualSettings(const FlightSettings &settings)
+    {
+        infer::ManualFlightSettings infer_settings;
+        infer_settings.manual_step_px = settings.manual_step_px;
+        infer_settings.boost_step_px = settings.boost_step_px;
+        infer_settings.trigger_distance_px = settings.trigger_distance_px;
+        infer_settings.cache_grid_px = settings.cache_grid_px;
+        infer_settings.path_overlay = settings.path_overlay;
+        infer_settings.control_bindings = settings.control_bindings;
+        return infer_settings;
     }
 
     void WebConsoleController::restoreLastAppliedLocked()
