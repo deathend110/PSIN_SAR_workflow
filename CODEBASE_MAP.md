@@ -24,6 +24,11 @@
 0. Exit
 ```
 
+当前实现补充：
+
+- `main()` 不是循环菜单，而是一次性 `switch -> return workflow::<mode>::Run(...)`
+- 因此模式函数一旦返回，进程也会一起退出到 shell
+
 ---
 
 ## 2. 主调用链
@@ -275,6 +280,9 @@ LoadConfig(web_console.yaml)
  -> stop worker
  -> join threads
  -> persist infer / rd / web configs
+ -> workflow::web::Run(...) returns
+ -> main() returns
+ -> process exits
 ```
 
 ---
@@ -398,8 +406,9 @@ main/configs/
 - Web Console 已有 `board_ip` 概念，终端启动时会打印实际访问地址
 - Web UI 默认隐藏设置面板，并带右上角黄色圆形 shutdown 按钮
 - `manual_flight` 已不再是预留壳，已经接入 infer 主链、Web 控制链和状态链
-- manual telemetry 当前通过 `SSE + 低频 /api/state` 混合更新
+- manual telemetry 当前以前端订阅的 `SSE state` 为主，`GET /api/state` 也能读到同一份状态；当前前端已不再对 manual 状态做低频轮询
 - `stop` 与 `shutdown_web` 是两个不同语义
+- 但按当前实现，`shutdown_web` 并不只是“停 HTTP 服务”；它会结束 `workflow::web::Run(...)`，进而让 `main()` 直接退出整个进程
 
 ---
 

@@ -27,6 +27,11 @@ main()
  -> 0. Exit
 ```
 
+当前实现补充说明：
+
+- `main()` 不是外层菜单循环，而是一次性选择模式后直接 `return workflow::<mode>::Run(...)`
+- 因此 `workflow::web::Run(...)` 一旦返回，整个 `psin_workflow` 进程也会随之退出到 shell
+
 ---
 
 ## 2. 非目标
@@ -166,6 +171,9 @@ browser
  -> worker thread
     -> workflow::rd::Run(AppConfig, WorkflowRunControl*)
     -> workflow::infer::Run(AppConfig, WorkflowRunControl*)
+ -> workflow::web::Run(...) returns
+ -> main() returns
+ -> process exits
 ```
 
 ---
@@ -326,6 +334,7 @@ Web：
 
 - `manual_flight` 相关接口已经实现，不再返回历史上的 `not_implemented`
 - `shutdown_web` 会触发安全关闭路径
+- 按当前代码，`shutdown_web` 的结果不是“仅关闭 HTTP 服务后主程序继续驻留”，而是结束 `workflow::web::Run(...)`；由于 `main()` 是一次性模式分发，这会进一步导致整个进程退出
 - 后台异常通过 controller 收口为 `Error` 状态，并经 `SSE / /api/state / 事件流` 暴露
 
 ---
@@ -340,7 +349,7 @@ Web 前端当前真实行为：
 - `patch_mode` 已包含 `manual_flight`
 - `Reserved Endpoints` 中的 `W/A/S/D` 和键盘输入会真正转发到 `/api/manual/key`
 - 前端不再维护旧的“按住/松开” manual key 集合；键盘输入只发送方向切换命令
-- 当前 manual telemetry 主要通过 `SSE` 状态事件暴露，`GET /api/state` 也可直接读取同一份 manual telemetry
+- 当前 manual telemetry 主要通过 `SSE` 状态事件暴露；`GET /api/state` 也可直接读取同一份 manual telemetry，但当前前端已不再对 manual 状态做低频轮询
 
 ---
 

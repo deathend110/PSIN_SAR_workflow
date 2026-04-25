@@ -2,23 +2,24 @@
 
 > 这里是可以直接复制给 Codex 的提示模板。
 
-现在有个bug：
-web 控制台点击右上角的关闭web console会直接把板子上运行的程序一起关闭。
-你依据 BUGFIX_TEMPLATE.md进行排查，在bug文件夹下落地一份新的bugfix文件
+删除SAR master skill
 
 ---
 
 ## 1. 阅读模式
-
 ```text
 先不要修改代码。
+加载AGENTS.md为当前工作区agent设置
+顺序阅读以下文件：
+- ARCHITECTURE_TEMPLATE.md
+- CODEBASE_MAP_TEMPLATE.md
+总览main文件下代码，确保你完全理解
 
-阅读以下目录并输出：
+并输出：
 1. 主入口调用链
 2. 每个核心类职责
 3. 数据流路径
 4. 线程/资源生命周期
-5. 你认为最容易出 bug 的 5 个点
 
 要求：
 - 引用具体文件和函数名
