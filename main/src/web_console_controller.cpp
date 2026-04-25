@@ -34,6 +34,13 @@ namespace workflow::web
             return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp";
         }
 
+        bool hasSourceId(const std::vector<SourceInfo> &sources, const std::string &id)
+        {
+            return std::any_of(sources.begin(), sources.end(), [&](const SourceInfo &info) {
+                return info.id == id;
+            });
+        }
+
         std::vector<SourceInfo> scanSources(const fs::path &root,
                                             const std::string &ext_filter,
                                             bool recursive,
@@ -203,6 +210,10 @@ namespace workflow::web
     std::optional<std::filesystem::path> WebConsoleController::resolveInferPreviewPath(const std::string &id) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!hasSourceId(listInferSourcesLocked(), id))
+        {
+            return std::nullopt;
+        }
         const fs::path path(id);
         if (!fs::exists(path) || !isImageFile(path))
         {
@@ -213,33 +224,41 @@ namespace workflow::web
 
     std::string WebConsoleController::applySelection(const std::unordered_map<std::string, std::string> &fields)
     {
+        std::thread worker_to_join;
         EventCallback callback;
         std::vector<PendingEvent> events;
+        shared::WorkflowSelection next_selection;
+        infer::AppConfig next_infer_cfg;
+        bool stop_paused_workflow = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (isRunningState(runtime_snapshot_.state))
+            if (runtime_snapshot_.state == shared::ControlState::Starting ||
+                runtime_snapshot_.state == shared::ControlState::Running ||
+                runtime_snapshot_.state == shared::ControlState::Stopping)
             {
                 return MakeErrorResponse("invalid_state", "Cannot change selection while a workflow is running.");
             }
 
+            next_selection = runtime_snapshot_.selection;
+            next_infer_cfg = infer_cfg_;
             if (const auto it = fields.find("workflow_mode"); it != fields.end())
             {
-                shared::SelectedWorkflow workflow = runtime_snapshot_.selection.workflow;
+                shared::SelectedWorkflow workflow = next_selection.workflow;
                 if (!ParseSelectedWorkflow(it->second, workflow))
                 {
                     return MakeErrorResponse("invalid_selection", "workflow_mode must be rd or infer.");
                 }
-                runtime_snapshot_.selection.workflow = workflow;
+                next_selection.workflow = workflow;
             }
             if (const auto it = fields.find("patch_mode"); it != fields.end())
             {
-                shared::SelectedPatchMode patch_mode = runtime_snapshot_.selection.patch_mode;
+                shared::SelectedPatchMode patch_mode = next_selection.patch_mode;
                 if (!ParseSelectedPatchMode(it->second, patch_mode))
                 {
                     return MakeErrorResponse("invalid_selection", "patch_mode must be auto_snake or manual_flight.");
                 }
-                runtime_snapshot_.selection.patch_mode = patch_mode;
-                infer_cfg_.patch_mode = ToString(patch_mode);
+                next_selection.patch_mode = patch_mode;
+                next_infer_cfg.patch_mode = ToString(patch_mode);
             }
             if (const auto it = fields.find("output_mode"); it != fields.end())
             {
@@ -248,14 +267,69 @@ namespace workflow::web
                 {
                     return MakeErrorResponse("invalid_selection", "output_mode must be hdmi or png.");
                 }
-                runtime_snapshot_.selection.output_mode = output_mode;
-                infer_cfg_.output_mode = output_mode;
+                next_selection.output_mode = output_mode;
+                next_infer_cfg.output_mode = output_mode;
             }
             if (const auto it = fields.find("selected_source"); it != fields.end())
             {
-                runtime_snapshot_.selection.selected_source = it->second;
+                next_selection.selected_source = it->second;
             }
 
+            if (!next_selection.selected_source.empty())
+            {
+                const auto &sources = next_selection.workflow == shared::SelectedWorkflow::InferOnly
+                                          ? listInferSourcesLocked()
+                                          : listRdSourcesLocked();
+                if (!hasSourceId(sources, next_selection.selected_source))
+                {
+                    return MakeErrorResponse("invalid_selection", "selected_source is not available for the current workflow.");
+                }
+            }
+
+            if (runtime_snapshot_.state == shared::ControlState::Paused)
+            {
+                stop_paused_workflow = true;
+                stop_requested_by_controller_ = true;
+                if (run_control_)
+                {
+                    run_control_->requestStop();
+                }
+                runtime_snapshot_.state = shared::ControlState::Stopping;
+                callback = event_callback_;
+                queueStateLocked(events);
+                queueLogLocked(events, "Stopping paused workflow before applying selection.");
+                if (worker_.joinable())
+                {
+                    worker_to_join = std::move(worker_);
+                }
+            }
+        }
+        dispatchEvents(callback, events);
+
+        if (worker_to_join.joinable())
+        {
+            worker_to_join.join();
+        }
+        joinWorkerIfNeeded();
+
+        events.clear();
+        callback = EventCallback{};
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            infer_cfg_ = next_infer_cfg;
+            runtime_snapshot_.selection = next_selection;
+            if (stop_paused_workflow)
+            {
+                runtime_snapshot_.state = shared::ControlState::Idle;
+                runtime_snapshot_.current_stage = "selection updated";
+                runtime_snapshot_.current_item.clear();
+                runtime_snapshot_.last_error.clear();
+                runtime_snapshot_.current_index = 0;
+                runtime_snapshot_.total_count = 0;
+                runtime_snapshot_.infer_ms = 0.0;
+                runtime_snapshot_.total_ms = 0.0;
+                runtime_snapshot_.fps = 0.0;
+            }
             callback = event_callback_;
             queueStateLocked(events);
         }

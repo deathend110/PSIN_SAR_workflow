@@ -35,14 +35,31 @@ namespace workflow::web
             std::string body;
         };
 
+        int socketSendFlags()
+        {
+            int flags = 0;
+#ifdef MSG_NOSIGNAL
+            flags |= MSG_NOSIGNAL;
+#endif
+            return flags;
+        }
+
         bool sendAll(int fd, const void *data, size_t size)
         {
             const char *cursor = static_cast<const char *>(data);
             size_t remaining = size;
             while (remaining > 0)
             {
-                const ssize_t written = ::send(fd, cursor, remaining, 0);
-                if (written <= 0)
+                const ssize_t written = ::send(fd, cursor, remaining, socketSendFlags());
+                if (written < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    return false;
+                }
+                if (written == 0)
                 {
                     return false;
                 }

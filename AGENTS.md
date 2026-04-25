@@ -187,3 +187,9 @@ When explaining changes, use this pattern:
 - reason
 - risk
 - validation
+
+
+## plus
+
+- use chinese output
+- use UTF-8 code to input powershell

@@ -158,8 +158,10 @@ button{font:inherit;cursor:pointer}
 #source-preview{width:100%;border-radius:14px;display:none;border:1px solid var(--line)}
 .preview-empty{font-size:13px;color:var(--muted);line-height:1.5}
 .status{grid-column:3/4}
-.kv-grid{display:grid;grid-template-columns:1fr auto;gap:8px 12px;font-family:Consolas,monospace;font-size:13px}
+.kv-grid{display:grid;grid-template-columns:minmax(128px,160px) minmax(0,1fr);gap:8px 12px;align-items:start;font-family:Consolas,monospace;font-size:13px}
 .kv-grid div{padding:8px 0;border-bottom:1px solid var(--line)}
+.kv-grid .status-key{color:var(--muted);font-weight:600;letter-spacing:.04em}
+.kv-grid .status-value{text-align:right;white-space:normal;word-break:break-word;overflow-wrap:anywhere}
 .settings{grid-column:2/4}
 .settings-grid{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap:16px}
 .settings-column{border:1px solid var(--line);border-radius:16px;padding:14px;background:#f8fafc}
@@ -256,10 +258,11 @@ function renderStatus(){
   grid.innerHTML="";
   pairs.forEach(([k,v])=>{
     const key=document.createElement("div");
+    key.className="status-key";
     key.textContent=k;
     const value=document.createElement("div");
+    value.className="status-value";
     value.textContent=v;
-    value.style.textAlign="right";
     grid.appendChild(key);
     grid.appendChild(value);
   });
@@ -272,8 +275,12 @@ function renderSources(){
     const button=document.createElement("button");
     button.className=`source-item ${app.selectedSource===item.id?"active":""}`;
     button.onclick=async ()=>{
+      const previousSelectedSource=app.selectedSource;
       app.selectedSource=item.id;
-      await pushSelection();
+      const response=await pushSelection();
+      if(!response.ok){
+        app.selectedSource=(app.state && app.state.selected_source) || previousSelectedSource;
+      }
       renderSources();
       renderPreview();
     };
@@ -361,6 +368,7 @@ async function pushSelection(){
   });
   logLine(`selection: ${response.message}`);
   await refreshState();
+  return response;
 }
 
 async function refreshState(){
@@ -378,8 +386,20 @@ async function reloadSources(){
   const workflow=(app.state && app.state.workflow_mode) || "infer";
   const payload=await getJson(`/api/sources?workflow=${encodeURIComponent(workflow)}`);
   app.sources=payload.items || [];
+  let autoSelected=false;
   if(!app.sources.find((item)=>item.id===app.selectedSource) && app.sources.length){
     app.selectedSource=app.sources[0].id;
+    autoSelected=true;
+  }else if(!app.sources.length){
+    app.selectedSource="";
+  }
+  if(autoSelected){
+    const response=await pushSelection();
+    if(!response.ok){
+      renderSources();
+      renderPreview();
+    }
+    return;
   }
   renderSources();
   renderPreview();
