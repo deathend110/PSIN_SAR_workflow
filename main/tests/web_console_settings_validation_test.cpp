@@ -32,6 +32,28 @@ namespace
         }
     }
 
+    std::filesystem::path FindRepoFile(const std::filesystem::path &relative_path)
+    {
+        std::filesystem::path current = std::filesystem::current_path();
+        for (int depth = 0; depth < 8; ++depth)
+        {
+            const std::filesystem::path candidate = current / relative_path;
+            if (std::filesystem::exists(candidate))
+            {
+                return candidate;
+            }
+
+            if (!current.has_parent_path())
+            {
+                break;
+            }
+            current = current.parent_path();
+        }
+
+        Fail("could not locate " + relative_path.generic_string());
+        return {};
+    }
+
     std::string ReadAll(const std::filesystem::path &path)
     {
         std::ifstream input(path, std::ios::binary);
@@ -43,6 +65,11 @@ namespace
         std::ostringstream buffer;
         buffer << input.rdbuf();
         return buffer.str();
+    }
+
+    std::string ReadFileText(const std::filesystem::path &path)
+    {
+        return ReadAll(path);
     }
 }
 
@@ -238,6 +265,57 @@ namespace
         Expect(infer_cfg.display_fps == 30, "valid display fps should persist in memory");
         Expect(rd_cfg.memory_limit_mb == 500, "valid RD memory limit should persist in memory");
     }
+
+    void TestWebConsoleSourcesExposeDebugRasterAndDebugStrideFields()
+    {
+        const std::string assets_source = ReadFileText(FindRepoFile("main/src/web_console_assets.cpp"));
+        const std::string protocol_source = ReadFileText(FindRepoFile("main/src/web_console_protocol.cpp"));
+
+        ExpectContains(assets_source,
+                       "\"debug_raster\"",
+                       "web console patch mode choices should expose debug_raster");
+        ExpectContains(assets_source,
+                       "infer.pipeline.debug.stride_x_px",
+                       "web console settings page should expose debug stride_x_px");
+        ExpectContains(assets_source,
+                       "infer.pipeline.debug.stride_y_px",
+                       "web console settings page should expose debug stride_y_px");
+        ExpectContains(protocol_source,
+                       "infer.pipeline.debug.stride_x_px",
+                       "settings response should serialize debug stride_x_px");
+        ExpectContains(protocol_source,
+                       "infer.pipeline.debug.stride_y_px",
+                       "settings response should serialize debug stride_y_px");
+    }
+
+    void TestDebugRasterSelectionAcceptsPngAndRejectsHdmi()
+    {
+        auto controller = MakeController();
+
+        const std::string ok_response = controller.applySelection({
+            {"patch_mode", "debug_raster"},
+            {"output_mode", "png"},
+        });
+
+        ExpectContains(ok_response, "\"ok\":true", "debug_raster + png should be accepted");
+        Expect(controller.inferConfig().patch_mode == "debug_raster",
+               "debug_raster selection should propagate into infer config");
+        Expect(controller.inferConfig().output_mode == "png",
+               "debug_raster selection should keep png output mode");
+
+        const std::string reject_response = controller.applySelection({
+            {"patch_mode", "debug_raster"},
+            {"output_mode", "hdmi"},
+        });
+
+        ExpectContains(reject_response, "\"ok\":false", "debug_raster + hdmi should be rejected");
+        ExpectContains(reject_response,
+                       "\"code\":\"invalid_selection\"",
+                       "debug_raster + hdmi should fail as an invalid selection");
+        ExpectContains(reject_response,
+                       "debug_raster requires output_mode=png.",
+                       "debug_raster should reject hdmi semantics with an explicit png-only message");
+    }
 }
 
 int main()
@@ -248,6 +326,8 @@ int main()
     TestRejectOverBudgetRdMemoryLimit();
     TestRejectedBatchDoesNotPersistInvalidValues();
     TestAcceptValidBoardBudgetSettings();
+    TestWebConsoleSourcesExposeDebugRasterAndDebugStrideFields();
+    TestDebugRasterSelectionAcceptsPngAndRejectsHdmi();
     std::cout << "web_console_settings_validation_test passed\n";
     return 0;
 }

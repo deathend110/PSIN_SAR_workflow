@@ -256,6 +256,59 @@ namespace
                            "publishSnapshot(control, cfg, patch_state, \"patch processed\""},
                           "infer_workflow.cpp should still distinguish manual and auto patch progress snapshots");
     }
+
+    void TestInferWorkflowInternalHeaderDeclaresTheDebugRasterPatchPlannerBoundary()
+    {
+        const auto header_path = FindRepoFile("main/include/workflow/infer/infer_workflow_internal.hpp");
+        const std::string header_source = ReadFileText(header_path);
+
+        ExpectContains(header_source,
+                       "class DebugRasterPatchSource",
+                       "infer internal header should declare the debug_raster planner boundary");
+        ExpectContains(header_source,
+                       "DebugRasterPatchSource(cv::Mat image_norm, int patch_size, int stride_x_px, int stride_y_px)",
+                       "debug_raster planner should accept independent X/Y stride parameters");
+        ExpectContainsAll(header_source,
+                          {"next(PatchPacket &packet)", "rows() const", "cols() const", "totalPatches() const"},
+                          "debug_raster planner should expose the same observable packet iteration boundary");
+    }
+
+    void TestPatchPlannerWillCarryTheDebugRasterRowMajorTraversal()
+    {
+        const auto planner_path = FindRepoFile("main/src/infer/patch_planner.cpp");
+        const std::string planner_source = ReadFileText(planner_path);
+
+        ExpectContains(planner_source,
+                       "DebugRasterPatchSource::next(PatchPacket &packet)",
+                       "patch planner implementation should own DebugRasterPatchSource iteration");
+        ExpectContains(planner_source,
+                       "const int row = cursor_ / cols_;",
+                       "debug_raster traversal should advance rows in top-to-bottom order");
+        ExpectContains(planner_source,
+                       "const int col = cursor_ % cols_;",
+                       "debug_raster traversal should advance columns left-to-right within each row");
+    }
+
+    void TestInferWorkflowAndOutputSinkCarryDebugRasterBranchAndOutputLayout()
+    {
+        const auto workflow_path = FindRepoFile("main/src/infer_workflow.cpp");
+        const auto sink_path = FindRepoFile("main/src/infer/output_sink.cpp");
+        const std::string workflow_source = ReadFileText(workflow_path);
+        const std::string sink_source = ReadFileText(sink_path);
+
+        ExpectContains(workflow_source,
+                       "debug_raster",
+                       "infer_workflow.cpp should carry a debug_raster top-level branch");
+        ExpectContains(workflow_source,
+                       "DebugRasterPatchSource patch_source",
+                       "infer_workflow.cpp should instantiate DebugRasterPatchSource for debug_raster");
+        ExpectContainsAll(sink_source,
+                          {"debug_", "restore", "mask_class", "patch_%06d.png"},
+                          "debug_raster output sink should write restore/mask_class PNGs under debug_<sar_stem>");
+        ExpectContainsAll(sink_source,
+                          {"restoreToGrayU8(", "logitsToMaskClassU8(", "best_cls + 1"},
+                          "debug_raster output sink should write raw 1-6 class IDs instead of RGB mask visualization");
+    }
 }
 
 int main()
@@ -269,6 +322,9 @@ int main()
     TestInferWorkflowInternalHeaderDeclaresThePatchPlannerBoundary();
     TestOutputSinkImplementationFileExistsAndOwnsTheHdmiOutputBoundary();
     TestInferWorkflowNoLongerContainsTheFullOutputSinkImplementation();
+    TestInferWorkflowInternalHeaderDeclaresTheDebugRasterPatchPlannerBoundary();
+    TestPatchPlannerWillCarryTheDebugRasterRowMajorTraversal();
+    TestInferWorkflowAndOutputSinkCarryDebugRasterBranchAndOutputLayout();
     TestInferWorkflowKeepsTheTopLevelOrchestrationSkeleton();
     TestInferWorkflowStillSplitsManualAndAutoSnakePaths();
     std::cout << "infer_workflow_regression_test passed\n";

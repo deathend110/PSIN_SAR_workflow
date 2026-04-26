@@ -19,6 +19,21 @@ build/ZG/psin_workflow
 - `Inference only`
 - `Web Console`
 
+当前补充：
+- `debug_raster` 已接入 Web Console / infer，作为新增 `patch_mode`
+- `debug_raster` 使用独立的 `pipeline.debug.stride_x_px` / `stride_y_px`
+- `debug_raster` 只允许 `output.mode=png`
+- 输出目录为 `output.dir/debug_<sar_stem>/restore|mask_class/patch_000000.png`
+
+调试增强：
+
+- 已实现，设计任务见：[task/TASK_DEBUG.md](../task/TASK_DEBUG.md)
+- 该能力集成在现有 Web Console 的 `infer` 模式内，作为 `debug_raster` patch mode
+- 它不会新增新的主菜单 workflow
+- 当前支持逐 patch 导出：
+  - `restore` `uint8` PNG
+  - `mask_class` `uint8` PNG，像素值直接表达 `1~6` 类
+
 典型数据链路为：
 
 ```text
@@ -239,6 +254,7 @@ infer_workflow.yaml
  -> patch source
     -> auto_snake: SnakePatchSource
     -> manual_flight: ManualFlightRuntime
+    -> debug_raster: DebugRasterPatchSource
  -> for each patch
     -> PatchTensorBuilder::build
     -> PatchInferenceRunner::forward
@@ -247,6 +263,7 @@ infer_workflow.yaml
     -> applyManualTelemetry
     -> composeIndustrialUiFrame
     -> sink.write
+    -> debug_raster additionally writes raw restore/mask_class PNGs without UI composition
  -> Device::Close
 ```
 
@@ -337,6 +354,8 @@ Note: the repository tracks `*.example.yaml` only. On first run, each workflow b
 - `pipeline.patch.mode`
 - `pipeline.patch.patch_size`
 - `pipeline.patch.stride`
+- `pipeline.debug.stride_x_px`
+- `pipeline.debug.stride_y_px`
 - `pipeline.icore.json`
 - `pipeline.icore.raw`
 - `pipeline.output_wait_ms`
@@ -361,6 +380,15 @@ output[1] = [1,512,512,6] FP32
 - `patch_size` 必须为 `512`
 - `stride` 必须为正整数
 - `output.mode` 只允许 `hdmi` 或 `png`
+
+当前 debug 扩展：
+
+- 已新增 `debug_raster` patch mode
+- 已新增独立的 debug X/Y 步长像素参数
+- `debug_raster` 下输出目录为：
+  - `output.dir/debug_<sar_stem>/restore/patch_000000.png`
+  - `output.dir/debug_<sar_stem>/mask_class/patch_000000.png`
+- 详细设计见 [task/TASK_DEBUG.md](../task/TASK_DEBUG.md)
 
 ### `configs/web_console.example.yaml`
 

@@ -497,6 +497,8 @@ namespace workflow::web
             return "auto_snake";
         case shared::SelectedPatchMode::ManualFlight:
             return "manual_flight";
+        case shared::SelectedPatchMode::DebugRaster:
+            return "debug_raster";
         }
         return "auto_snake";
     }
@@ -528,6 +530,11 @@ namespace workflow::web
         if (lowered == "manual_flight")
         {
             patch_mode = shared::SelectedPatchMode::ManualFlight;
+            return true;
+        }
+        if (lowered == "debug_raster")
+        {
+            patch_mode = shared::SelectedPatchMode::DebugRaster;
             return true;
         }
         return false;
@@ -647,6 +654,8 @@ namespace workflow::web
         appendJsonField(oss, first, "infer.pipeline.patch.mode", infer_cfg.patch_mode);
         appendJsonField(oss, first, "infer.pipeline.patch.patch_size", std::to_string(infer_cfg.patch_size), false);
         appendJsonField(oss, first, "infer.pipeline.patch.stride", std::to_string(infer_cfg.stride), false);
+        appendJsonField(oss, first, "infer.pipeline.debug.stride_x_px", std::to_string(infer_cfg.debug_stride_x_px), false);
+        appendJsonField(oss, first, "infer.pipeline.debug.stride_y_px", std::to_string(infer_cfg.debug_stride_y_px), false);
         appendJsonField(oss, first, "infer.pipeline.output_wait_ms", std::to_string(infer_cfg.output_wait_ms), false);
         appendJsonField(oss, first, "infer.display.width", std::to_string(infer_cfg.display_width), false);
         appendJsonField(oss, first, "infer.display.height", std::to_string(infer_cfg.display_height), false);

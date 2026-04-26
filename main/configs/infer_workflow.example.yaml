@@ -47,12 +47,18 @@ pipeline:
     # manual_flight = 低自由度扫描游标模式：
     #   左上角起点、默认向右、W/A/S/D 只改方向、每完成一个 patch 再推进一步。
     mode: auto_snake
+    # debug_raster = row-major debug export mode, PNG-only
 
     # 模型输入 patch 尺寸。当前模型固定要求 512x512，输入数据为 float32 0-1。
     patch_size: 512
 
     # 自动蛇形扫描步长。256 表示横向/纵向 50% overlap，边缘不足完整 patch 的区域丢弃。
     stride: 128
+
+  debug:
+    # debug_raster 独立的 X/Y 像素步长，仅在 patch.mode=debug_raster 时生效。
+    stride_x_px: 128
+    stride_y_px: 128
 
   icore:
     json: ./imodel/ZG/bf16/RAAUNet_DeepCA48_MobileNetV3Unet_V1_ZG.json
@@ -79,6 +85,8 @@ output:
 
   # png 模式下的输出目录。实际路径为：dir/<sar_image_stem>/patch_000000.png。
   dir: ./io/output
+  # 普通 infer: dir/<sar_image_stem>/patch_000000.png
+  # debug_raster: dir/debug_<sar_image_stem>/restore|mask_class/patch_000000.png
 
   # png 模式下如果目标文件已存在，是否覆盖。
   overwrite: true

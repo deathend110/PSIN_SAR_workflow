@@ -74,6 +74,20 @@ namespace workflow::web
             return value == "hdmi" || value == "png";
         }
 
+        bool isDebugRasterMode(shared::SelectedPatchMode patch_mode)
+        {
+            return patch_mode == shared::SelectedPatchMode::DebugRaster;
+        }
+
+        std::string validateInferSelection(shared::SelectedPatchMode patch_mode, const std::string &output_mode)
+        {
+            if (isDebugRasterMode(patch_mode) && output_mode != "png")
+            {
+                return "debug_raster requires output_mode=png.";
+            }
+            return {};
+        }
+
         bool isValidRdExecutionMode(const std::string &value)
         {
             return value == "auto" ||
@@ -90,6 +104,10 @@ namespace workflow::web
             if (infer_cfg.stride <= 0)
             {
                 throwInvalidSettings("infer.pipeline.patch.stride must be positive.");
+            }
+            if (infer_cfg.debug_stride_x_px <= 0 || infer_cfg.debug_stride_y_px <= 0)
+            {
+                throwInvalidSettings("infer.pipeline.debug.stride_x_px and stride_y_px must be positive.");
             }
             if (infer_cfg.stride > infer::kExpectedW)
             {
@@ -400,7 +418,7 @@ namespace workflow::web
                 shared::SelectedPatchMode patch_mode = next_selection.patch_mode;
                 if (!ParseSelectedPatchMode(it->second, patch_mode))
                 {
-                    return MakeErrorResponse("invalid_selection", "patch_mode must be auto_snake or manual_flight.");
+                    return MakeErrorResponse("invalid_selection", "patch_mode must be auto_snake, manual_flight, or debug_raster.");
                 }
                 next_selection.patch_mode = patch_mode;
                 next_infer_cfg.patch_mode = ToString(patch_mode);
@@ -414,6 +432,11 @@ namespace workflow::web
                 }
                 next_selection.output_mode = output_mode;
                 next_infer_cfg.output_mode = output_mode;
+            }
+            const std::string selection_error = validateInferSelection(next_selection.patch_mode, next_selection.output_mode);
+            if (!selection_error.empty())
+            {
+                return MakeErrorResponse("invalid_selection", selection_error);
             }
             if (const auto it = fields.find("selected_source"); it != fields.end())
             {
@@ -560,7 +583,7 @@ namespace workflow::web
                         shared::SelectedPatchMode patch_mode = next_selection.patch_mode;
                         if (!ParseSelectedPatchMode(value, patch_mode))
                         {
-                            throw std::runtime_error("infer.pipeline.patch.mode must be auto_snake or manual_flight.");
+                            throw std::runtime_error("infer.pipeline.patch.mode must be auto_snake, manual_flight, or debug_raster.");
                         }
                         next_selection.patch_mode = patch_mode;
                         next_infer_cfg.patch_mode = ToString(patch_mode);
@@ -572,6 +595,14 @@ namespace workflow::web
                     else if (key == "infer.pipeline.patch.stride")
                     {
                         next_infer_cfg.stride = parseStrictInt(value, key);
+                    }
+                    else if (key == "infer.pipeline.debug.stride_x_px")
+                    {
+                        next_infer_cfg.debug_stride_x_px = parseStrictInt(value, key);
+                    }
+                    else if (key == "infer.pipeline.debug.stride_y_px")
+                    {
+                        next_infer_cfg.debug_stride_y_px = parseStrictInt(value, key);
                     }
                     else if (key == "infer.pipeline.output_wait_ms")
                     {
@@ -678,6 +709,12 @@ namespace workflow::web
                     {
                         next_flight_settings.control_bindings = value;
                     }
+                }
+
+                const std::string selection_error = validateInferSelection(next_selection.patch_mode, next_selection.output_mode);
+                if (!selection_error.empty())
+                {
+                    throw std::runtime_error(selection_error);
                 }
 
                 validateSettingsBudget(next_infer_cfg, next_rd_cfg);

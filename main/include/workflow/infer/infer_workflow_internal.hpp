@@ -152,6 +152,9 @@ namespace workflow::infer
         PngFrameSink(std::filesystem::path output_dir, bool overwrite);
 
         void write(const RuntimeState &state, const cv::Mat &frame_bgr) override;
+        void writeDebugPatchOutputs(const RuntimeState &state,
+                                    const cv::Mat &restore_gray,
+                                    const cv::Mat &mask_class);
 
     private:
         std::filesystem::path output_dir_;
@@ -263,6 +266,28 @@ namespace workflow::infer
         cv::Mat image_norm_;
         int patch_size_ = 512;
         int stride_ = 256;
+        int rows_ = 0;
+        int cols_ = 0;
+        int total_ = 0;
+        int cursor_ = 0;
+    };
+
+    class DebugRasterPatchSource
+    {
+    public:
+        DebugRasterPatchSource(cv::Mat image_norm, int patch_size, int stride_x_px, int stride_y_px);
+
+        bool next(PatchPacket &packet);
+
+        int totalPatches() const;
+        int rows() const;
+        int cols() const;
+
+    private:
+        cv::Mat image_norm_;
+        int patch_size_ = 512;
+        int stride_x_px_ = 256;
+        int stride_y_px_ = 256;
         int rows_ = 0;
         int cols_ = 0;
         int total_ = 0;

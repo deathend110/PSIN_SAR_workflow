@@ -33,9 +33,11 @@ namespace workflow::infer
         cfg.sar_img_ext = shared::ValueOr(values, "input.sar_img_ext", cfg.sar_img_ext);
         cfg.recursive = shared::BoolValueOr(values, "input.recursive", cfg.recursive, "Failed to parse input.recursive");
 
-        cfg.patch_mode = shared::ValueOr(values, "pipeline.patch.mode", cfg.patch_mode);
+        cfg.patch_mode = shared::ToLower(shared::ValueOr(values, "pipeline.patch.mode", cfg.patch_mode));
         cfg.patch_size = shared::IntValueOr(values, "pipeline.patch.patch_size", cfg.patch_size);
         cfg.stride = shared::IntValueOr(values, "pipeline.patch.stride", cfg.stride);
+        cfg.debug_stride_x_px = shared::IntValueOr(values, "pipeline.debug.stride_x_px", cfg.debug_stride_x_px);
+        cfg.debug_stride_y_px = shared::IntValueOr(values, "pipeline.debug.stride_y_px", cfg.debug_stride_y_px);
         cfg.json_path = shared::ValueOr(values, "pipeline.icore.json", "");
         cfg.raw_path = shared::ValueOr(values, "pipeline.icore.raw", "");
         cfg.output_wait_ms = shared::IntValueOr(values, "pipeline.output_wait_ms", cfg.output_wait_ms);
@@ -61,6 +63,10 @@ namespace workflow::infer
         {
             throw std::runtime_error("pipeline.patch.stride must be positive.");
         }
+        if (cfg.debug_stride_x_px <= 0 || cfg.debug_stride_y_px <= 0)
+        {
+            throw std::runtime_error("pipeline.debug.stride_x_px/stride_y_px must be positive.");
+        }
         if (cfg.json_path.empty() || cfg.raw_path.empty())
         {
             throw std::runtime_error("pipeline.icore.json/raw must be configured.");
@@ -68,6 +74,10 @@ namespace workflow::infer
         if (cfg.output_mode != "hdmi" && cfg.output_mode != "png")
         {
             throw std::runtime_error("output.mode must be either hdmi or png.");
+        }
+        if (cfg.patch_mode == "debug_raster" && cfg.output_mode != "png")
+        {
+            throw std::runtime_error("debug_raster requires output_mode=png.");
         }
 
         return cfg;
@@ -96,6 +106,9 @@ namespace workflow::infer
         oss << "    mode: " << cfg.patch_mode << "\n";
         oss << "    patch_size: " << cfg.patch_size << "\n";
         oss << "    stride: " << cfg.stride << "\n";
+        oss << "  debug:\n";
+        oss << "    stride_x_px: " << cfg.debug_stride_x_px << "\n";
+        oss << "    stride_y_px: " << cfg.debug_stride_y_px << "\n";
         oss << "  icore:\n";
         oss << "    json: " << cfg.json_path << "\n";
         oss << "    raw: " << cfg.raw_path << "\n";

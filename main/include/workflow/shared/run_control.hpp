@@ -28,6 +28,7 @@ namespace workflow::shared
     {
         AutoSnake,
         ManualFlight,
+        DebugRaster,
     };
 
     struct WorkflowSelection

@@ -28,6 +28,8 @@ namespace workflow::infer
         std::string patch_mode = "auto_snake";
         int patch_size = kExpectedH;
         int stride = 256;
+        int debug_stride_x_px = 256;
+        int debug_stride_y_px = 256;
 
         std::string json_path;
         std::string raw_path;

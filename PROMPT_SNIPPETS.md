@@ -2,7 +2,11 @@
 
 > 这里是可以直接复制给 Codex 的提示模板。
 
-调用superpower的相关skill进行，按照排期文档task\TASK_REBUILE_SCHEDULE.md执行，每个step都必须按照下面流程执行：
+下一步我需要你在本地终端实现一个debug模式，这个模式输出固定为png，而且要分别输出模型的恢复图和分割maskRGB图
+目的是为了我后续对比计算模型在GPU上和板端量化模型的恢复分割效果，调用superpower的相关skill进行设计，落地为
+task\TASK_DEBUG.md，并同步更新main\Host Computer Software.md等相关文档。
+
+调用superpower的相关skill进行，按照排期文档task\TASK_DEBUG.md执行:
 
 ### A. 设计总览agent，主agent
 只看代码，不写代码。负责整体流程的把控

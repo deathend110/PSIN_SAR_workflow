@@ -162,6 +162,33 @@ namespace workflow::infer
         return mask_bgr;
     }
 
+    cv::Mat logitsToMaskClassU8(const Tensor &tensor)
+    {
+        const auto *data = reinterpret_cast<const float *>(tensor.data().cptr());
+        cv::Mat mask_class(kExpectedH, kExpectedW, CV_8UC1);
+        for (int y = 0; y < kExpectedH; ++y)
+        {
+            auto *row = mask_class.ptr<std::uint8_t>(y);
+            for (int x = 0; x < kExpectedW; ++x)
+            {
+                const int base = (y * kExpectedW + x) * kSegClasses;
+                int best_cls = 0;
+                float best_score = data[base];
+                for (int cls = 1; cls < kSegClasses; ++cls)
+                {
+                    const float score = data[base + cls];
+                    if (score > best_score)
+                    {
+                        best_score = score;
+                        best_cls = cls;
+                    }
+                }
+                row[x] = static_cast<std::uint8_t>(best_cls + 1);
+            }
+        }
+        return mask_class;
+    }
+
     PngFrameSink::PngFrameSink(std::filesystem::path output_dir, bool overwrite)
         : output_dir_(std::move(output_dir)), overwrite_(overwrite)
     {
@@ -182,6 +209,35 @@ namespace workflow::infer
         if (!cv::imwrite(path.string(), frame_bgr))
         {
             throw std::runtime_error("Failed to write PNG output: " + path.string());
+        }
+    }
+
+    void PngFrameSink::writeDebugPatchOutputs(const RuntimeState &state,
+                                              const cv::Mat &restore_gray,
+                                              const cv::Mat &mask_class)
+    {
+        const auto debug_dir = output_dir_ / ("debug_" + state.sar_stem);
+        const auto restore_dir = debug_dir / "restore";
+        const auto mask_dir = debug_dir / "mask_class";
+        fs::create_directories(restore_dir);
+        fs::create_directories(mask_dir);
+
+        char name[64] = {0};
+        std::snprintf(name, sizeof(name), "patch_%06d.png", state.patch.index);
+        const auto restore_path = restore_dir / name;
+        const auto mask_path = mask_dir / name;
+
+        if ((fs::exists(restore_path) || fs::exists(mask_path)) && !overwrite_)
+        {
+            return;
+        }
+        if (!cv::imwrite(restore_path.string(), restore_gray))
+        {
+            throw std::runtime_error("Failed to write PNG output: " + restore_path.string());
+        }
+        if (!cv::imwrite(mask_path.string(), mask_class))
+        {
+            throw std::runtime_error("Failed to write PNG output: " + mask_path.string());
         }
     }
 
@@ -440,19 +496,32 @@ namespace workflow::infer
         const auto infer_end = std::chrono::steady_clock::now();
 
         cv::Mat restore_gray = restoreToGrayU8(host_outputs[0]);
-        cv::Mat restore_bgr;
-        cv::cvtColor(restore_gray, restore_bgr, cv::COLOR_GRAY2BGR);
         cv::Mat mask_bgr = logitsToMaskBgr(host_outputs[1]);
 
         state.infer_ms = std::chrono::duration<double, std::milli>(infer_end - infer_start).count();
         state.frame_index = ++frame_counter;
         state.total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - patch_start).count();
         state.fps = state.total_ms > 0.0 ? (1000.0 / state.total_ms) : 0.0;
-        cv::Mat frame_bgr = composeIndustrialUiFrame(ui_context, state, restore_bgr, mask_bgr, cfg.display_width, cfg.display_height);
-        state.total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - patch_start).count();
-        state.fps = state.total_ms > 0.0 ? (1000.0 / state.total_ms) : 0.0;
-        frame_bgr = composeIndustrialUiFrame(ui_context, state, restore_bgr, mask_bgr, cfg.display_width, cfg.display_height);
-        sink.write(state, frame_bgr);
+        if (cfg.patch_mode == "debug_raster")
+        {
+            auto *png_sink = dynamic_cast<PngFrameSink *>(&sink);
+            if (png_sink == nullptr)
+            {
+                throw std::runtime_error("debug_raster requires PNG frame sink.");
+            }
+            cv::Mat mask_class = logitsToMaskClassU8(host_outputs[1]);
+            png_sink->writeDebugPatchOutputs(state, restore_gray, mask_class);
+        }
+        else
+        {
+            cv::Mat restore_bgr;
+            cv::cvtColor(restore_gray, restore_bgr, cv::COLOR_GRAY2BGR);
+            cv::Mat frame_bgr = composeIndustrialUiFrame(ui_context, state, restore_bgr, mask_bgr, cfg.display_width, cfg.display_height);
+            state.total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - patch_start).count();
+            state.fps = state.total_ms > 0.0 ? (1000.0 / state.total_ms) : 0.0;
+            frame_bgr = composeIndustrialUiFrame(ui_context, state, restore_bgr, mask_bgr, cfg.display_width, cfg.display_height);
+            sink.write(state, frame_bgr);
+        }
 
         spdlog::info("[{}/{}] {} patch #{}/{} frame={} row={} col={} x={} y={} infer={:.2f}ms total={:.2f}ms fps={:.1f}",
                      state.sar_index,

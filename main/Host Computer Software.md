@@ -2,6 +2,7 @@
 > - 这份文档保留了阶段性设计和实现路线，适合看“为什么这么拆”。
 > - 当前仓库的实时运行事实以 [main/README.md](./README.md) 为准，尤其是主菜单行为、`manual_flight` 现状、`HDMI STOPPED` 终止态，以及 `*.example.yaml -> 本地 *.yaml` 的配置语义。
 > - 当前仓库只跟踪 `main/configs/*.example.yaml`，运行时会在同目录生成本地 `*.yaml` 副本并把 Web 修改后的配置写回这些本地副本。
+> - `debug_raster` 调试模式已实现；设计与实现边界见 [task/TASK_DEBUG.md](../task/TASK_DEBUG.md)。它集成在现有 Web Console 的 `infer` 模式内，而不是新增主菜单 workflow。
 
 **第一阶段优先做 HDMI 展示增强**
 先不要急着做 Web 控制台。你现在主链路已经通了，最先能出效果的是在 HDMI 输出上加：
@@ -126,3 +127,29 @@ Web Console 接口语义要求：
   - patch 完成后再推进一步
   - 到边缘停住，等待新的有效方向输入
 - 旧的自由飞行骨架（`keydown/keyup` 长按驱动、速度/阻尼、`trigger_distance_px` 触发、manual simulation thread）已经退出主语义
+
+
+**Debug Raster 调试模式**
+
+为后续比对 GPU 浮点模型和板端量化模型的 patch 级恢复/分割效果，当前仓库已实现一个集成在 Web Console 中的 `debug_raster` 模式，设计见 [task/TASK_DEBUG.md](../task/TASK_DEBUG.md)。
+
+当前已经确认的设计边界：
+
+- `debug_raster` 不新增主菜单 workflow，而是作为 `infer` 的新增 patch mode
+- 底图选择逻辑与普通 `infer` 一致
+- patch 扫描逻辑独立于 `auto_snake`
+  - 左到右
+  - 上到下
+  - 逐行扫描
+- 行列步长继续使用像素值参数
+- 输出固定为 PNG，不走 HDMI
+- 每个 patch 分别落盘两张 `uint8` 图：
+  - `output_dir/debug_<sar_stem>/restore/patch_000000.png`
+  - `output_dir/debug_<sar_stem>/mask_class/patch_000000.png`
+
+当前实现补充：
+- `debug_raster` 已经接入现有 Web Console / `infer`
+- `debug_raster` 保持 PNG-only，不允许 HDMI
+- patch 扫描为左到右、上到下、逐行输出
+
+这个模式的目标是“最小改动、最大复用现有 infer 与 PNG 输出链”，而不是新增一个大而全的调试 workflow。

@@ -117,9 +117,16 @@ namespace workflow::infer
 
         shared::SelectedPatchMode parsePatchMode(const std::string &mode)
         {
-            return shared::ToLower(mode) == "manual_flight"
-                       ? shared::SelectedPatchMode::ManualFlight
-                       : shared::SelectedPatchMode::AutoSnake;
+            const std::string lowered = shared::ToLower(mode);
+            if (lowered == "manual_flight")
+            {
+                return shared::SelectedPatchMode::ManualFlight;
+            }
+            if (lowered == "debug_raster")
+            {
+                return shared::SelectedPatchMode::DebugRaster;
+            }
+            return shared::SelectedPatchMode::AutoSnake;
         }
 
         shared::WorkflowSelection makeSelection(const AppConfig &cfg)
@@ -522,6 +529,11 @@ int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
                      cfg.output_mode,
                      cfg.sar_img_dir.string(),
                      cfg.json_path);
+        const shared::SelectedPatchMode patch_mode = parsePatchMode(cfg.patch_mode);
+        if (patch_mode == shared::SelectedPatchMode::DebugRaster && cfg.output_mode != "png")
+        {
+            throw std::runtime_error("debug_raster requires output_mode=png.");
+        }
 
         setStage("collect SAR images");
         publishSnapshot(control, cfg, published_state, "collect SAR images", shared::ControlState::Starting, cfg.sar_img_dir.string());
@@ -616,7 +628,6 @@ int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
                                      frame_counter);
         };
         bool stop_requested = false;
-        const shared::SelectedPatchMode patch_mode = parsePatchMode(cfg.patch_mode);
         if (patch_mode == shared::SelectedPatchMode::ManualFlight && sar_files.size() != 1)
         {
             throw std::runtime_error("manual_flight requires exactly one selected SAR image.");
@@ -677,6 +688,47 @@ int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
                     publishSnapshot(control, cfg, patch_state, "manual patch processed", shared::ControlState::Running, sar_path.string());
                     base_state = patch_state;
                     ++patch_index;
+                }
+            }
+            else if (patch_mode == shared::SelectedPatchMode::DebugRaster)
+            {
+                DebugRasterPatchSource patch_source(sar_norm, cfg.patch_size, cfg.debug_stride_x_px, cfg.debug_stride_y_px);
+                base_state.patch_count = patch_source.totalPatches();
+                base_state.stride = cfg.debug_stride_x_px;
+                spdlog::info("Debug raster grid for {}: rows={}, cols={}, total={}, stride_x_px={}, stride_y_px={}",
+                             base_state.sar_stem,
+                             patch_source.rows(),
+                             patch_source.cols(),
+                             patch_source.totalPatches(),
+                             cfg.debug_stride_x_px,
+                             cfg.debug_stride_y_px);
+                ui_context.mini_map = buildMiniMapContext(sar_norm,
+                                                          cfg.patch_size,
+                                                          cfg.debug_stride_x_px,
+                                                          patch_source.rows(),
+                                                          patch_source.cols());
+
+                PatchPacket packet;
+                while (patch_source.next(packet))
+                {
+                    if (control != nullptr)
+                    {
+                        control->waitIfPaused();
+                        if (control->shouldStop())
+                        {
+                            publishSnapshot(control, cfg, base_state, "stop requested", shared::ControlState::Stopping, sar_path.string());
+                            stop_requested = true;
+                            break;
+                        }
+                    }
+
+                    RuntimeState patch_state = processPatch(packet, base_state, ui_context);
+                    publishSnapshot(control, cfg, patch_state, "debug patch processed", shared::ControlState::Running, sar_path.string());
+                }
+
+                if (stop_requested)
+                {
+                    break;
                 }
             }
             else

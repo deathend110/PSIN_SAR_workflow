@@ -193,14 +193,14 @@ button{font:inherit;cursor:pointer}
     {
         static const std::string js = R"JS((function(){
 const workflowChoices=[["rd","RD only"],["infer","Inference only"]];
-const patchChoices=[["auto_snake","auto_snake"],["manual_flight","manual_flight"]];
+const patchChoices=[["auto_snake","auto_snake"],["manual_flight","manual_flight"],["debug_raster","debug_raster"]];
 const outputChoices=[["hdmi","hdmi"],["png","png"]];
 const inferFields=[
   ["infer.sys.device","sys.device"],["infer.sys.run_backend","sys.run_backend"],["infer.sys.mmuMode","sys.mmuMode"],
   ["infer.sys.speedMode","sys.speedMode"],["infer.sys.compressFtmp","sys.compressFtmp"],["infer.sys.ocm_option","sys.ocm_option"],
   ["infer.sys.profile","sys.profile"],["infer.input.sar_img_dir","input.sar_img_dir"],["infer.input.sar_img_ext","input.sar_img_ext"],
   ["infer.input.recursive","input.recursive"],["infer.pipeline.patch.mode","pipeline.patch.mode"],["infer.pipeline.patch.patch_size","pipeline.patch.patch_size"],
-  ["infer.pipeline.patch.stride","pipeline.patch.stride"],["infer.pipeline.output_wait_ms","pipeline.output_wait_ms"],["infer.display.width","display.width"],
+  ["infer.pipeline.patch.stride","pipeline.patch.stride"],["infer.pipeline.debug.stride_x_px","pipeline.debug.stride_x_px"],["infer.pipeline.debug.stride_y_px","pipeline.debug.stride_y_px"],["infer.pipeline.output_wait_ms","pipeline.output_wait_ms"],["infer.display.width","display.width"],
   ["infer.display.height","display.height"],["infer.display.fps","display.fps"],["infer.output.mode","output.mode"],["infer.output.dir","output.dir"],["infer.output.overwrite","output.overwrite"]
 ];
 const rdFields=[
