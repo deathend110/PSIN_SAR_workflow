@@ -17,7 +17,8 @@ namespace workflow::infer
 
     AppConfig LoadConfig(const std::filesystem::path &config_path)
     {
-        const auto values = shared::LoadSimpleYaml(config_path);
+        const auto runtime_config_path = shared::EnsureRuntimeConfigFile(config_path);
+        const auto values = shared::LoadSimpleYaml(runtime_config_path);
 
         AppConfig cfg;
         cfg.device_url = shared::ValueOr(values, "sys.device", "axi://zg330aiu?npu=0x40000000&dma=0x80000000");
@@ -74,6 +75,7 @@ namespace workflow::infer
 
     void SaveConfig(const std::filesystem::path &config_path, const AppConfig &cfg)
     {
+        const auto runtime_config_path = shared::RuntimeConfigPath(config_path);
         std::ostringstream oss;
         oss << "sys:\n";
         oss << "  device: " << cfg.device_url << "\n";
@@ -112,6 +114,6 @@ namespace workflow::infer
         oss << "debug:\n";
         oss << "  dump_backend_log: " << BoolText(cfg.dump_backend_log) << "\n";
 
-        shared::WriteTextFileAtomically(config_path, oss.str());
+        shared::WriteTextFileAtomically(runtime_config_path, oss.str());
     }
 }

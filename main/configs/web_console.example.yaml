@@ -1,3 +1,6 @@
+# web_console.example.yaml
+# 首次运行时会自动 bootstrap 为同目录 web_console.yaml，本文件只作为仓库示例模板保留。
+
 server:
   bind: 0.0.0.0
   board_ip: 192.168.137.100

@@ -1,6 +1,7 @@
 #include "workflow/web/web_console.hpp"
 
 #include "workflow/infer/infer_config.hpp"
+#include "workflow/shared/config_utils.hpp"
 #include "workflow/web/web_console_config.hpp"
 #include "workflow/web/web_console_controller.hpp"
 #include "workflow/web/web_console_server.hpp"
@@ -51,12 +52,12 @@ namespace workflow::web
                                       const WebConsoleConfig &base_web_cfg,
                                       const WebConsoleController &controller)
         {
-            infer::SaveConfig(base_web_cfg.infer_config_path, controller.inferConfig());
-            rd::SaveConfig(base_web_cfg.rd_config_path, controller.rdConfig());
+            infer::SaveConfig(shared::RuntimeConfigPath(base_web_cfg.infer_config_path), controller.inferConfig());
+            rd::SaveConfig(shared::RuntimeConfigPath(base_web_cfg.rd_config_path), controller.rdConfig());
 
             WebConsoleConfig persisted_web_cfg = base_web_cfg;
             persisted_web_cfg.flight_settings = controller.flightSettings();
-            SaveConfig(web_config_path, persisted_web_cfg);
+            SaveConfig(shared::RuntimeConfigPath(web_config_path), persisted_web_cfg);
         }
     }
 

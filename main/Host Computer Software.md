@@ -37,7 +37,7 @@ Web 控制台负责：
 
 当前补充说明：
 
-- Web Console 的实际访问地址配置在 [web_console.yaml](g:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/web_console.yaml)
+- Web Console 的实际访问地址配置在 [web_console.example.yaml](g:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/web_console.example.yaml)，首次运行会自动生成同名本地 `web_console.yaml` 副本
 - `server.bind` 表示板子服务端监听地址
 - `server.board_ip` 表示上位机浏览器实际应访问的板子 IP
 - 当命令行选择：

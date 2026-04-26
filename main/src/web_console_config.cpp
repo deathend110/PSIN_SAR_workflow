@@ -17,7 +17,8 @@ namespace workflow::web
 
     WebConsoleConfig LoadConfig(const std::filesystem::path &config_path)
     {
-        const auto values = shared::LoadSimpleYaml(config_path);
+        const auto runtime_config_path = shared::EnsureRuntimeConfigFile(config_path);
+        const auto values = shared::LoadSimpleYaml(runtime_config_path);
 
         WebConsoleConfig cfg;
         cfg.bind_address = shared::ValueOr(values, "server.bind", cfg.bind_address);
@@ -25,8 +26,8 @@ namespace workflow::web
         cfg.port = shared::IntValueOr(values, "server.port", cfg.port);
         cfg.sse_heartbeat_ms = shared::IntValueOr(values, "server.sse_heartbeat_ms", cfg.sse_heartbeat_ms);
         cfg.ui_title = shared::ValueOr(values, "ui.title", cfg.ui_title);
-        cfg.infer_config_path = shared::ValueOr(values, "config.infer_path", cfg.infer_config_path.string());
-        cfg.rd_config_path = shared::ValueOr(values, "config.rd_path", cfg.rd_config_path.string());
+        cfg.infer_config_path = shared::RuntimeConfigPath(shared::ValueOr(values, "config.infer_path", cfg.infer_config_path.string()));
+        cfg.rd_config_path = shared::RuntimeConfigPath(shared::ValueOr(values, "config.rd_path", cfg.rd_config_path.string()));
         cfg.flight_settings.manual_step_px = shared::IntValueOr(values, "flight.manual_step_px", cfg.flight_settings.manual_step_px);
         cfg.flight_settings.boost_step_px = shared::IntValueOr(values, "flight.boost_step_px", cfg.flight_settings.boost_step_px);
         cfg.flight_settings.trigger_distance_px = shared::IntValueOr(values, "flight.trigger_distance_px", cfg.flight_settings.trigger_distance_px);
@@ -59,6 +60,7 @@ namespace workflow::web
 
     void SaveConfig(const std::filesystem::path &config_path, const WebConsoleConfig &cfg)
     {
+        const auto runtime_config_path = shared::RuntimeConfigPath(config_path);
         std::ostringstream oss;
         oss << "server:\n";
         oss << "  bind: " << cfg.bind_address << "\n";
@@ -81,6 +83,6 @@ namespace workflow::web
         oss << "  path_overlay: " << BoolText(cfg.flight_settings.path_overlay) << "\n";
         oss << "  control_bindings: " << cfg.flight_settings.control_bindings << "\n";
 
-        shared::WriteTextFileAtomically(config_path, oss.str());
+        shared::WriteTextFileAtomically(runtime_config_path, oss.str());
     }
 }

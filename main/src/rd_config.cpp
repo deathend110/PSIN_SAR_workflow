@@ -17,7 +17,8 @@ namespace workflow::rd
 
     AppConfig LoadConfig(const std::filesystem::path &config_path)
     {
-        const auto values = shared::LoadSimpleYaml(config_path);
+        const auto runtime_config_path = shared::EnsureRuntimeConfigFile(config_path);
+        const auto values = shared::LoadSimpleYaml(runtime_config_path);
 
         AppConfig cfg;
         cfg.echo_dir = shared::ValueOr(values, "rd.echo_dir", cfg.echo_dir.string());
@@ -58,6 +59,7 @@ namespace workflow::rd
 
     void SaveConfig(const std::filesystem::path &config_path, const AppConfig &cfg)
     {
+        const auto runtime_config_path = shared::RuntimeConfigPath(config_path);
         std::ostringstream oss;
         oss << "rd:\n";
         oss << "  execution_mode: " << cfg.execution_mode << "\n";
@@ -72,6 +74,6 @@ namespace workflow::rd
         oss << "  keep_scratch: " << BoolText(cfg.keep_scratch) << "\n";
         oss << "  overwrite: " << BoolText(cfg.overwrite) << "\n";
 
-        shared::WriteTextFileAtomically(config_path, oss.str());
+        shared::WriteTextFileAtomically(runtime_config_path, oss.str());
     }
 }

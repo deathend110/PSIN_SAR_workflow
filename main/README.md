@@ -29,9 +29,9 @@ main/
   build_main.sh
   Host Computer Software.md
   configs/
-    infer_workflow.yaml
-    rd_imaging.yaml
-    web_console.yaml
+    infer_workflow.example.yaml
+    rd_imaging.example.yaml
+    web_console.example.yaml
   include/
     infer_workflow_hdmi_display.hpp
     workflow/
@@ -291,7 +291,9 @@ browser
 
 ## 5. 配置文件
 
-### `configs/rd_imaging.yaml`
+Note: the repository tracks `*.example.yaml` only. On first run, each workflow bootstraps a local `*.yaml` copy next to the example file if the runtime file is missing.
+
+### `configs/rd_imaging.example.yaml`
 
 关键字段：
 
@@ -313,7 +315,7 @@ browser
 - `memory_float32`
 - `scratch_double`
 
-### `configs/infer_workflow.yaml`
+### `configs/infer_workflow.example.yaml`
 
 关键字段：
 
@@ -355,7 +357,7 @@ output[1] = [1,512,512,6] FP32
 - `stride` 必须为正整数
 - `output.mode` 只允许 `hdmi` 或 `png`
 
-### `configs/web_console.yaml`
+### `configs/web_console.example.yaml`
 
 关键字段：
 
@@ -508,7 +510,7 @@ cd main
 
 使用：
 
-- `configs/rd_imaging.yaml`
+  - local runtime copy of `configs/rd_imaging.yaml`, bootstrapped from `configs/rd_imaging.example.yaml` when missing
 
 ### 启动 Inference only
 
@@ -518,7 +520,7 @@ cd main
 
 使用：
 
-- `configs/infer_workflow.yaml`
+  - local runtime copy of `configs/infer_workflow.yaml`, bootstrapped from `configs/infer_workflow.example.yaml` when missing
 
 ### 启动 Web Console
 
@@ -528,7 +530,7 @@ cd main
 
 使用：
 
-- `configs/web_console.yaml`
+  - local runtime copy of `configs/web_console.yaml`, bootstrapped from `configs/web_console.example.yaml` when missing
 
 程序启动后会在终端打印：
 

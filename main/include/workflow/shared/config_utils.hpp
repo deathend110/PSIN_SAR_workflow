@@ -12,6 +12,8 @@ namespace workflow::shared
     bool ParseBool(const std::string &value, const std::string &error_context = {});
 
     std::unordered_map<std::string, std::string> LoadSimpleYaml(const std::filesystem::path &config_path);
+    std::filesystem::path RuntimeConfigPath(const std::filesystem::path &config_path);
+    std::filesystem::path EnsureRuntimeConfigFile(const std::filesystem::path &config_path);
 
     std::string ValueOr(const std::unordered_map<std::string, std::string> &values,
                         const std::string &key,

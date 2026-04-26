@@ -2,16 +2,27 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace workflow::shared
 {
     namespace
     {
+        constexpr const char *kExampleYamlSuffix = ".example.yaml";
+        constexpr const char *kYamlSuffix = ".yaml";
+
         std::string JoinPath(const std::vector<std::string> &scopes)
         {
             std::string path;
@@ -24,6 +35,49 @@ namespace workflow::shared
                 path += scope;
             }
             return path;
+        }
+
+        bool EndsWith(const std::string &value, const std::string &suffix)
+        {
+            return value.size() >= suffix.size() &&
+                   value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+        }
+
+        std::filesystem::path ExampleConfigPath(const std::filesystem::path &runtime_path)
+        {
+            const auto filename = runtime_path.filename().string();
+            if (EndsWith(filename, kExampleYamlSuffix))
+            {
+                return runtime_path;
+            }
+
+            std::filesystem::path example_path = runtime_path;
+            example_path.replace_filename(runtime_path.stem().string() + kExampleYamlSuffix);
+            return example_path;
+        }
+
+        std::string ReadTextFile(const std::filesystem::path &path)
+        {
+            std::ifstream ifs(path, std::ios::binary);
+            if (!ifs)
+            {
+                throw std::runtime_error("Failed to open config yaml: " + path.string());
+            }
+
+            std::string content;
+            ifs.seekg(0, std::ios::end);
+            const auto size = ifs.tellg();
+            ifs.seekg(0, std::ios::beg);
+            if (size > 0)
+            {
+                content.resize(static_cast<std::size_t>(size));
+                ifs.read(content.data(), static_cast<std::streamsize>(content.size()));
+                if (!ifs && !ifs.eof())
+                {
+                    throw std::runtime_error("Failed to read config yaml: " + path.string());
+                }
+            }
+            return content;
         }
     }
 
@@ -120,6 +174,37 @@ namespace workflow::shared
         return values;
     }
 
+    std::filesystem::path RuntimeConfigPath(const std::filesystem::path &config_path)
+    {
+        const auto filename = config_path.filename().string();
+        if (!EndsWith(filename, kExampleYamlSuffix))
+        {
+            return config_path;
+        }
+
+        std::filesystem::path runtime_path = config_path;
+        runtime_path.replace_filename(filename.substr(0, filename.size() - std::char_traits<char>::length(kExampleYamlSuffix)) + kYamlSuffix);
+        return runtime_path;
+    }
+
+    std::filesystem::path EnsureRuntimeConfigFile(const std::filesystem::path &config_path)
+    {
+        const auto runtime_path = RuntimeConfigPath(config_path);
+        if (std::filesystem::exists(runtime_path))
+        {
+            return runtime_path;
+        }
+
+        const auto example_path = ExampleConfigPath(runtime_path);
+        if (!std::filesystem::exists(example_path))
+        {
+            throw std::runtime_error("Missing runtime config and example bootstrap source: " + runtime_path.string());
+        }
+
+        WriteTextFileAtomically(runtime_path, ReadTextFile(example_path));
+        return runtime_path;
+    }
+
     std::string ValueOr(const std::unordered_map<std::string, std::string> &values,
                         const std::string &key,
                         const std::string &default_value)
@@ -158,29 +243,39 @@ namespace workflow::shared
             }
         }
 
-        const auto temp_path = path.string() + ".tmp";
+        const auto temp_name = path.filename().string() + ".tmp." +
+                               std::to_string(static_cast<unsigned long long>(
+                                   std::chrono::steady_clock::now().time_since_epoch().count()));
+        const auto temp_path = parent.empty() ? std::filesystem::path(temp_name) : parent / temp_name;
         {
             std::ofstream ofs(temp_path, std::ios::binary | std::ios::trunc);
             if (!ofs)
             {
-                throw std::runtime_error("Failed to open temp config file for write: " + temp_path);
+                throw std::runtime_error("Failed to open temp config file for write: " + temp_path.string());
             }
             ofs << content;
             ofs.flush();
             if (!ofs)
             {
-                throw std::runtime_error("Failed to write config file: " + temp_path);
+                throw std::runtime_error("Failed to write config file: " + temp_path.string());
             }
         }
 
+#ifdef _WIN32
+        if (!MoveFileExW(temp_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            std::error_code ec;
+            std::filesystem::remove(temp_path, ec);
+            throw std::runtime_error("Failed to replace config file: " + path.string());
+        }
+#else
         std::error_code ec;
-        std::filesystem::remove(path, ec);
-        ec.clear();
         std::filesystem::rename(temp_path, path, ec);
         if (ec)
         {
             std::filesystem::remove(temp_path, ec);
             throw std::runtime_error("Failed to replace config file: " + path.string());
         }
+#endif
     }
 }

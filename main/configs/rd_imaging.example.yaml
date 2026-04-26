@@ -1,6 +1,6 @@
-# rd_imaging.yaml
+# rd_imaging.example.yaml
 # 独立 RD 成像程序配置：echo 回波 bin -> SAR 灰度 PNG。
-# 建议从 main/ 目录运行 psin_workflow，这样相对路径会指向当前工程目录。
+# 首次运行时会自动 bootstrap 为同目录 rd_imaging.yaml，本文件只作为仓库示例模板保留。
 
 rd:
   # RD 执行模式：
