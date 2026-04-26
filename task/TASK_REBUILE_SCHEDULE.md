@@ -1,8 +1,8 @@
 # TASK_REBUILE_SCHEDULE: REBUILE 任务排期总表
 
 ## 0. Meta
-- 范围：`TASK_REBUILE_01` ~ `TASK_REBUILE_11`
-- 目标：给现有 11 条重建任务建立执行顺序、阶段门、并行关系和暂停点
+- 范围：`TASK_REBUILE_01` ~ `TASK_REBUILE_11`，以及 `TASK_REBUILE_06A` ~ `TASK_REBUILE_06D`
+- 目标：给现有重建任务建立执行顺序、阶段门、并行关系和暂停点；其中 `TASK_REBUILE_06` 已细化为 4 个执行子阶段
 - 排期原则：
   - 先修“能验证、能护栏、能减少失误”的近期项
   - 再做“收边界、拆职责、隔离硬件”的长期项
@@ -35,7 +35,10 @@
 - [ ] `TASK_REBUILE_07`
 
 ### Wave 5：Infer 编排层收窄
-- [ ] `TASK_REBUILE_06`
+- [ ] `TASK_REBUILE_06A`
+- [ ] `TASK_REBUILE_06B`
+- [ ] `TASK_REBUILE_06C`
+- [ ] `TASK_REBUILE_06D`
 
 ### Wave 6：硬件边界隔离
 - [ ] `TASK_REBUILE_10`
@@ -117,14 +120,42 @@
 - 阶段门：
   - parser / route / SSE 有独立边界与最小测试口
 
-### Step 9
-- 执行：`TASK_REBUILE_06`
+### Step 9A
+- 执行：`TASK_REBUILE_06A`
 - 原因：
-  - 必须在 `TASK_REBUILE_09` 之后做
-  - 否则会一边拆文件一边搬隐式状态，风险过高
+  - `infer_workflow.cpp` 里 UI render 是最纯、最稳定、最适合先切的职责
+  - 同时需要先补 `infer_workflow_internal.hpp`，为后续子阶段建立内部边界
 - 阶段门：
-  - `infer_workflow.cpp` 更接近编排层
-  - 输出和设备访问顺序不变
+  - `infer_workflow_internal.hpp` 已建立
+  - UI render helper 已迁出
+  - `STOPPED` / `PAUSED` / `EDGE HOLD` / `RUNNING` 视觉语义不变
+
+### Step 9B
+- 执行：`TASK_REBUILE_06B`
+- 原因：
+  - patch planner 是第二个最适合迁出的边界
+  - 可以在不碰输出链的前提下继续收窄 `infer_workflow.cpp`
+- 阶段门：
+  - `SnakePatchSource` 已迁出
+  - rows / cols / total / 蛇形顺序行为不变
+
+### Step 9C
+- 执行：`TASK_REBUILE_06C`
+- 原因：
+  - output sink / HDMI worker 是 `TASK_REBUILE_06` 中风险最高的一段，必须单独成阶段
+  - 只有在 UI render 和 patch planner 已稳定后，才适合处理输出链
+- 阶段门：
+  - output sink / HDMI worker 已迁出
+  - device lock 顺序、mailbox 语义、STOPPED 终帧语义不变
+
+### Step 9D
+- 执行：`TASK_REBUILE_06D`
+- 原因：
+  - 前 3 个边界稳定后，最后才能做编排层收口
+  - 避免“边界还没稳就顺手重排顶层流程”的大补丁
+- 阶段门：
+  - `infer_workflow.cpp` 以 orchestration 为主
+  - stop / finish / error 收尾语义不变
 
 ### Step 10
 - 执行：`TASK_REBUILE_10`
@@ -162,7 +193,13 @@
   - 前者是后者前置
 - `TASK_REBUILE_09` 与 `TASK_REBUILE_06`
   - 前者是后者前置
-- `TASK_REBUILE_06` 与 `TASK_REBUILE_10`
+- `TASK_REBUILE_06A` 与 `TASK_REBUILE_06B`
+  - `06A` 先建立内部边界头和 UI render 边界，`06B` 再抽 planner
+- `TASK_REBUILE_06B` 与 `TASK_REBUILE_06C`
+  - `06C` 依赖前两段边界稳定后再处理输出链
+- `TASK_REBUILE_06C` 与 `TASK_REBUILE_06D`
+  - `06D` 是最终编排层收口，必须最后做
+- `TASK_REBUILE_06D` 与 `TASK_REBUILE_10`
   - 同时碰 infer 边界，冲突风险高
 
 ---
@@ -185,7 +222,10 @@
 - [ ] ManualFlight 状态已显式对象化
 
 ### Gate D：进入 Wave 6 前
-- [ ] `TASK_REBUILE_06` 完成
+- [ ] `TASK_REBUILE_06A` 完成
+- [ ] `TASK_REBUILE_06B` 完成
+- [ ] `TASK_REBUILE_06C` 完成
+- [ ] `TASK_REBUILE_06D` 完成
 - [ ] infer 编排层边界清楚
 
 ---
@@ -202,9 +242,12 @@
 6. `TASK_REBUILE_04`
 7. `TASK_REBUILE_09`
 8. `TASK_REBUILE_07`
-9. `TASK_REBUILE_06`
-10. `TASK_REBUILE_10`
-11. `TASK_REBUILE_08`
+9. `TASK_REBUILE_06A`
+10. `TASK_REBUILE_06B`
+11. `TASK_REBUILE_06C`
+12. `TASK_REBUILE_06D`
+13. `TASK_REBUILE_10`
+14. `TASK_REBUILE_08`
 
 ---
 
@@ -212,6 +255,7 @@
 
 - 不允许跨 Wave 随意插入大重构
 - 每个 Wave 结束前必须做验证
+- `TASK_REBUILE_06` 必须按 `06A -> 06B -> 06C -> 06D` 顺序推进，不建议跳阶段
 - 如果某任务需要突破其 `Allowed files to modify`，必须先回到排期层重审
 - `TASK_REBUILE_08` 默认不进入近期开发窗口，除非配置复杂度继续上涨
 
@@ -219,7 +263,7 @@
 
 ## 7. Done when
 
-- 11 条重建任务有明确执行顺序
+- 重建任务及 `TASK_REBUILE_06A` ~ `06D` 子阶段都有明确执行顺序
 - 前置依赖和不可并行关系清楚
 - 近期任务与长期任务分层清楚
 - 后续实现者可以直接按本文件进入执行，而不需要重新做一次排期判断
