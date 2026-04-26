@@ -7,6 +7,7 @@ cd "${SCRIPT_DIR}"
 TARGET_NAME="psin_workflow"
 LOG_DIR="${SCRIPT_DIR}/log"
 BUILD_DIR="${SCRIPT_DIR}/build/ZG"
+TOOLCHAIN_FILE="${SCRIPT_DIR}/../cmake/toolchains/zg330-aarch64.cmake"
 mkdir -p "${LOG_DIR}"
 
 CONFIGURE_LOG="${LOG_DIR}/cmake_configure.log"
@@ -32,7 +33,11 @@ fi
   echo "[workdir] ${SCRIPT_DIR}"
   echo "[build_dir] ${BUILD_DIR}"
   echo "[target] ${TARGET_NAME}"
-  cmake -S . -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release
+  echo "[toolchain] ${TOOLCHAIN_FILE}"
+  cmake -S . -B "${BUILD_DIR}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DPSIN_BUILD_PROFILE=zg330 \
+    -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}"
 } 2>&1 | tee "${CONFIGURE_LOG}"
 
 {

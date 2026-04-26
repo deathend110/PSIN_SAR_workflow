@@ -1,14 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.16)
-
-if(WIN32)
-    message(FATAL_ERROR "main/ psin_workflow is Linux/ZG only. Windows builds are intentionally unsupported for this stage.")
-endif()
-
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
-set(CMAKE_C_COMPILER /usr/bin/aarch64-linux-gnu-gcc)
-set(CMAKE_CXX_COMPILER /usr/bin/aarch64-linux-gnu-g++)
-set(CMAKE_BUILD_TYPE Release)
+cmake_minimum_required(VERSION 3.16)
 
 project(PSINWorkflow LANGUAGES CXX)
 
@@ -20,6 +10,40 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 file(MAKE_DIRECTORY ${PROJECT_SOURCE_DIR}/log)
+
+set(PSIN_BUILD_PROFILE "zg330" CACHE STRING "Build profile: zg330 or host-tests")
+set_property(CACHE PSIN_BUILD_PROFILE PROPERTY STRINGS zg330 host-tests)
+
+function(psin_add_host_regression_test target_name)
+    add_executable(${target_name} ${ARGN})
+    target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(${target_name} PRIVATE cxx_std_17)
+    add_test(NAME ${target_name} COMMAND ${target_name})
+endfunction()
+
+if(PSIN_BUILD_PROFILE STREQUAL "host-tests")
+    enable_testing()
+
+    psin_add_host_regression_test(
+        main_menu_regression_test
+        tests/main_menu_regression_test.cpp
+        src/config_utils.cpp
+    )
+
+    psin_add_host_regression_test(
+        hdmi_stopped_regression_test
+        tests/hdmi_stopped_regression_test.cpp
+    )
+    return()
+endif()
+
+if(NOT PSIN_BUILD_PROFILE STREQUAL "zg330")
+    message(FATAL_ERROR "Unsupported PSIN_BUILD_PROFILE='${PSIN_BUILD_PROFILE}'. Expected 'zg330' or 'host-tests'.")
+endif()
+
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+    message(FATAL_ERROR "PSIN_BUILD_PROFILE=zg330 requires a Linux build host and ZG330 toolchain.")
+endif()
 
 add_compile_definitions(USE_ZG330_BACKEND)
 

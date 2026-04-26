@@ -2,7 +2,7 @@
 
 > 这里是可以直接复制给 Codex 的提示模板。
 
-调用superpower的相关skill进行排期执行，每个任务文件都必须按照下面流程执行：
+调用superpower的相关skill进行，按照排期文档task\TASK_REBUILE_SCHEDULE.md执行，每个step都必须按照下面流程执行：
 
 ### A. 设计总览agent，主agent
 只看代码，不写代码。负责整体流程的把控
@@ -34,7 +34,7 @@
 5. 是否建议合并
 6. 若不建议，最关键的 3 个问题是什么
 
-当review agent结果和你作为主agent的总览意见一致通过后才进入下一个任务
+当review agent结果和你作为主agent的总览意见一致通过后再提交给我，我做板端实际部署测试
 
 
 ---

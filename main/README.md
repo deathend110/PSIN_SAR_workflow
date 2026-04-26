@@ -434,6 +434,13 @@ browser key/button
 
 ## 8. 构建
 
+当前仓库的构建入口分成两条：
+
+- `host/native`：只用于最小回归测试构建，不产出 `psin_workflow`
+- `ZG330`：保留现有板端主程序构建入口
+
+### ZG330 主程序构建
+
 推荐在 `main/` 目录下构建：
 
 ```bash
@@ -447,15 +454,42 @@ chmod +x build_main.sh
 ```bash
 cd main
 mkdir -p log
-cmake -S . -B build/ZG -DCMAKE_BUILD_TYPE=Release 2>&1 | tee log/cmake_configure.log
+cmake -S . -B build/ZG \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPSIN_BUILD_PROFILE=zg330 \
+  -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/zg330-aarch64.cmake 2>&1 | tee log/cmake_configure.log
 cmake --build build/ZG -j$(nproc) 2>&1 | tee log/cmake_build.log
 ```
 
 说明：
 
-- `CMakeLists.txt` 当前固定交叉编译到 `Linux/aarch64`
+- `CMakeLists.txt` 不再默认把所有构建固定到 `Linux/aarch64`
+- ZG330 交叉编译器路径移动到 `../cmake/toolchains/zg330-aarch64.cmake`
 - Windows 上直接配置会被显式拒绝
 - 依赖来自 `../deps` 以及系统里的 icraft 包
+- 仓库根目录也提供了 `zg330-release` preset，等价命令是 `cmake --preset zg330-release`
+
+### host/native 回归测试构建
+
+`host/native` 路径只接最小回归测试目标：
+
+- `main_menu_regression_test`
+- `hdmi_stopped_regression_test`
+
+示例：
+
+```bash
+cmake --preset host-debug
+cmake --preset host-tests
+cmake --build --preset host-tests
+ctest --preset host-tests --output-on-failure
+```
+
+说明：
+
+- `host-debug` 和 `host-tests` 都走 `PSIN_BUILD_PROFILE=host-tests`
+- `host-debug` 用于手动检查 host/native Debug 配置是否可用
+- `host-tests` 用于标准化的回归测试配置、构建和 `ctest` 入口
 
 ## 9. 运行
 

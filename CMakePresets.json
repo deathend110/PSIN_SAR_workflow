@@ -1,0 +1,68 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "host-debug",
+      "displayName": "Host Debug Regression Build",
+      "description": "Configure the host/native regression-test-only build in Debug mode.",
+      "binaryDir": "${sourceDir}/out/host-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "PSIN_BUILD_PROFILE": "host-tests"
+      }
+    },
+    {
+      "name": "host-tests",
+      "displayName": "Host Test Regression Build",
+      "description": "Configure the host/native regression-test-only build used by CTest.",
+      "binaryDir": "${sourceDir}/out/host-tests",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "PSIN_BUILD_PROFILE": "host-tests"
+      }
+    },
+    {
+      "name": "zg330-release",
+      "displayName": "ZG330 Release Build",
+      "description": "Configure the ZG330 cross-compiled release build.",
+      "binaryDir": "${sourceDir}/out/zg330-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "PSIN_BUILD_PROFILE": "zg330",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/zg330-aarch64.cmake"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "host-tests",
+      "configurePreset": "host-tests",
+      "configuration": "Debug"
+    },
+    {
+      "name": "zg330-release",
+      "configurePreset": "zg330-release",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "host-tests",
+      "configurePreset": "host-tests",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
