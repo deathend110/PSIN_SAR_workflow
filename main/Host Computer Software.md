@@ -1,3 +1,8 @@
+> 说明：
+> - 这份文档保留了阶段性设计和实现路线，适合看“为什么这么拆”。
+> - 当前仓库的实时运行事实以 [main/README.md](./README.md) 为准，尤其是主菜单行为、`manual_flight` 现状、`HDMI STOPPED` 终止态，以及 `*.example.yaml -> 本地 *.yaml` 的配置语义。
+> - 当前仓库只跟踪 `main/configs/*.example.yaml`，运行时会在同目录生成本地 `*.yaml` 副本并把 Web 修改后的配置写回这些本地副本。
+
 **第一阶段优先做 HDMI 展示增强**
 先不要急着做 Web 控制台。你现在主链路已经通了，最先能出效果的是在 HDMI 输出上加：
 

@@ -35,7 +35,7 @@
 6. 若不建议，最关键的 3 个问题是什么
 
 当review agent结果和你作为主agent的总览意见一致通过后再提交给我，我做板端实际部署测试
-
+当前执行到step 5，你现在进入step 6的工作
 
 ---
 
@@ -46,8 +46,8 @@
 加载AGENTS.md为当前工作区agent设置
 顺序阅读以下文件：
 - README.md
-- ARCHITECTURE_TEMPLATE.md
-- CODEBASE_MAP_TEMPLATE.md
+- ARCHITECTURE.md
+- CODEBASE_MAP.md
 总览main文件下代码，确保你完全理解
 
 并输出：

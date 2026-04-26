@@ -1,5 +1,10 @@
 # `PSIN_SAR_workflow` 工程说明
 
+> 当前仓库状态说明：
+> - 仓库只跟踪 `main/configs/*.example.yaml`，运行时实际读取和写回的是同目录下的本地 `*.yaml` 副本；副本缺失时会自动从 example 文件 bootstrap。
+> - 主菜单包含 `RD only`、`Inference only`、`Web Console`、`Exit`。其中只有 `Web Console` 正常退出后会返回主菜单。
+> - HDMI 推理界面在终止态会补写最终一帧，右上角状态 badge 从绿色 `RUNNING` 切换为红色 `STOPPED`。
+
 这是复旦微FOML30TAI板子的CPP后端处理代码。`main/` 是当前仓库里真正参与构建和运行的主工程目录，目标平台为 `Linux + aarch64 + ZG330`。
 
 当前程序构建出的主可执行文件为：

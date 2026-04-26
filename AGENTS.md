@@ -8,6 +8,8 @@ You must behave like a scoped software engineer working under explicit architect
 Your job is **not** to redesign the whole project unless the task explicitly asks for that.  
 Your default mode is: **understand first, change narrowly, verify thoroughly, explain clearly**.
 
+Automatic load superpower skill to finish my prompt
+
 ---
 
 ## Default working mode

@@ -2,6 +2,10 @@
 
 Phase 3 Fix2：Web Console 设置持久化与设置面板折叠化
 
+> 当前仓库状态更正：
+> - 仓库现在只跟踪 `main/configs/*.example.yaml`；本任务里提到的 `infer_workflow.yaml`、`rd_imaging.yaml`、`web_console.yaml` 都指运行时本地副本，而不是仓库默认模板。
+> - 当前持久化目标已经固定为本地 runtime YAML，正常退出 Web Console 后不会再写脏仓库里的 example 文件。
+
 ---
 
 ## 1. Background
@@ -10,9 +14,9 @@ Phase 3 Fix2：Web Console 设置持久化与设置面板折叠化
 
 - 当前 Web Console 已经有完整的 `Settings Workspace`，前端通过 `/api/settings` 读取配置，并通过 `POST /api/settings` 调用 [web_console_controller.cpp](G:/Docker_windows_disk/PSIN_SAR_workflow/main/src/web_console_controller.cpp) 的 `applySettings(...)` 把修改写入内存。
 - 但当前设置修改只停留在内存态：
-  - 推理配置来自 [infer_workflow.yaml](G:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/infer_workflow.yaml)
-  - RD 配置来自 [rd_imaging.yaml](G:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/rd_imaging.yaml)
-  - Web 配置来自 [web_console.yaml](G:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/web_console.yaml)
+  - 推理配置模板来自 [infer_workflow.example.yaml](G:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/infer_workflow.example.yaml)，运行时使用本地 `infer_workflow.yaml`
+  - RD 配置模板来自 [rd_imaging.example.yaml](G:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/rd_imaging.example.yaml)，运行时使用本地 `rd_imaging.yaml`
+  - Web 配置模板来自 [web_console.example.yaml](G:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/web_console.example.yaml)，运行时使用本地 `web_console.yaml`
   - 现有实现只有 `LoadConfig(...)`，没有对应的 YAML 写回能力。
 - 当前页面布局中，`Settings Workspace` 常驻占据大块区域，导致默认打开页面时，下面的 `Event Stream` 和 `Reserved Endpoints` 往往需要滚动才能看到。
 - 现在希望把“设置”从“常驻大块面板”改成“按需展开的设置入口”，同时在退出 Web Console 时，把已经应用到内存中的设置直接写回 YAML，形成下次启动可复用的持久配置。

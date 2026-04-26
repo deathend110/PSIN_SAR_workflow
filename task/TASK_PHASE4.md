@@ -1,6 +1,11 @@
 # Task title
 
 Phase 4：实现 manual_flight 无人机模式，并接通 Web Console 控制、推理触发与 HDMI UI 展示
+
+> 当前仓库状态更正：
+> - `manual_flight` 主闭环已经接通，不再返回 `not_implemented`。
+> - 当前语义也已经不是“自由飞行无人机模式”，而是后续在 `TASK_PHASE4_FIX2.md` 中收敛成的低自由度扫描游标模式。
+> - 运行时配置仍然遵循 `*.example.yaml -> 本地 *.yaml` 的加载与持久化语义。
 ---
 
 ## 1. Background
@@ -12,11 +17,11 @@ Phase 4：实现 manual_flight 无人机模式，并接通 Web Console 控制、
   - [main/src/web_console_server.cpp](G:/Docker_windows_disk/PSIN_SAR_workflow/main/src/web_console_server.cpp) 中已有 `POST /api/manual/key`
   - [main/src/web_console_assets.cpp](G:/Docker_windows_disk/PSIN_SAR_workflow/main/src/web_console_assets.cpp) 中已有 `manual_flight` 选项与 `W/A/S/D` 键盘监听
   - [main/src/web_console_controller.cpp](G:/Docker_windows_disk/PSIN_SAR_workflow/main/src/web_console_controller.cpp) 中已有 `commandManualKey(...)` 占位
-- 但当前真实行为仍是“保留阶段，未实现”：
+- 但在本任务提出时，真实行为仍是“保留阶段，未实现”：
   - `manual_flight` 启动会被拒绝
   - `manual_flight` 下的 `Pause` 被拒绝
   - `commandManualKey(...)` 直接返回 `not_implemented`
-  - [main/src/infer_workflow.cpp](G:/Docker_windows_disk/PSIN_SAR_workflow/main/src/infer_workflow.cpp) 仍会抛出 `manual_flight is reserved for a future phase.`
+  - [main/src/infer_workflow.cpp](G:/Docker_windows_disk/PSIN_SAR_workflow/main/src/infer_workflow.cpp) 曾抛出 `manual_flight is reserved for a future phase.`
 - 当前 Web 配置里已经有一组 `flight.*` 参数，并且已经接入读写闭环：
   - `flight.manual_step_px`
   - `flight.boost_step_px`

@@ -2,6 +2,11 @@
 
 第三阶段：板端嵌入式 Web 控制台与工作流控制层
 
+> 当前仓库状态更正：
+> - 本任务已完成落地，`main()` 当前已经包含 `Web Console` 入口。
+> - 仓库只跟踪 `main/configs/*.example.yaml`；运行时实际加载和持久化的是本地 `*.yaml` 副本。
+> - `manual_flight` 已不再是 `not_implemented` 占位模式，后续语义以 `TASK_PHASE4_FIX2.md` 和 `main/README.md` 记录的低自由度扫描游标模型为准。
+
 ---
 
 ## 1. Background
@@ -14,9 +19,9 @@
 - 第二阶段已经把 `hdmi` 推理显示拆成“推理线程 + HDMI/UI 线程”，但控制入口仍然是本地终端，不适合板端长期运行和上位机浏览器控制。
 - 浏览器不能直接连接“裸 TCP 自定义协议”，所以这里的“简单 TCP”在工程上必须落成浏览器可用的 HTTP 服务；实时状态推送采用同一 TCP 端口上的 SSE（Server-Sent Events），命令用 HTTP POST，避免额外实现 WebSocket。
 - 当前配置来源已经明确：
-  - 推理配置来自 [main/configs/infer_workflow.yaml]( /g:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/infer_workflow.yaml:1 )
-  - RD 配置来自 [main/configs/rd_imaging.yaml]( /g:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/rd_imaging.yaml:1 )
-  - 现有 `LoadConfig(...)` 只支持从 YAML 读配置，没有写回 YAML 的能力
+  - 推理配置模板来自 [main/configs/infer_workflow.example.yaml]( /g:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/infer_workflow.example.yaml:1 )，运行时读取本地 `infer_workflow.yaml`
+  - RD 配置模板来自 [main/configs/rd_imaging.example.yaml]( /g:/Docker_windows_disk/PSIN_SAR_workflow/main/configs/rd_imaging.example.yaml:1 )，运行时读取本地 `rd_imaging.yaml`
+  - 当前实现已经支持在 Web Console 正常退出时写回本地 runtime YAML
 - 当前 `workflow::rd::Run(...)` 和 `workflow::infer::Run(...)` 都是阻塞式入口，因此要支持 `start / pause / stop / reset`，必须增加一个新的“控制层 + 后台运行线程”，不能只加一个 HTTP server。
 
 ---

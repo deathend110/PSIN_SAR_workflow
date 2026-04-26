@@ -2,6 +2,11 @@
 
 - 单入口模块化重构：将 `main/src/infer_workflow.cpp` 与 `main/src/rd_imaging_stream.cpp` 的入口逻辑收口为一个 `main.cpp`，并按中等粒度拆出可维护的模块边界
 
+> 当前仓库状态更正：
+> - 当前主菜单实际为 `RD only / Inference only / Web Console / Exit`，不是早期的三项菜单。
+> - 仓库现在只跟踪 `main/configs/*.example.yaml`；文中出现的 `infer_workflow.yaml`、`rd_imaging.yaml`、`web_console.yaml` 都应理解为运行时本地副本。
+> - `manual_flight` 已经接入真实执行链路，不再是单纯预留扩展点。
+
 ---
 
 ## 1. Background
@@ -17,7 +22,7 @@
 - RD 成像主路径来自 `main/src/rd_imaging_stream.cpp`
 - 推理主路径来自 `main/src/infer_workflow.cpp`
 - 当前工程运行目标是 `Linux + aarch64 + ZG330`
-- `ManualFlightPatchSource` 只是预留扩展点，不属于本次接线范围
+- `manual_flight` 早期曾是预留扩展点；当前仓库中它已经接入真实执行链路，但不属于本任务当时的改动范围
 
 ---
 
@@ -27,9 +32,10 @@
 
 1. 主程序只保留一个入口 `main/src/main.cpp`
 2. 用户可见主程序名统一为 `psin_workflow`
-3. 启动后显示一个简单菜单，只支持：
+3. 启动后显示一个简单菜单，当前实际支持：
    - `RD only`
    - `Inference only`
+   - `Web Console`
    - `Exit`
 4. `RD only` 调度 RD 模块，不改变原有成像逻辑、输出路径与 scratch 生命周期
 5. `Inference only` 调度推理模块，不改变原有 patch 规则、模型接口、HDMI/PNG 输出语义
@@ -66,8 +72,8 @@
 - `main/src/infer_config.cpp`
 - `main/src/infer_workflow.cpp`
 - `main/include/infer_workflow_hdmi_display.hpp`
-- `main/configs/infer_workflow.yaml`
-- `main/configs/rd_imaging.yaml`
+- `main/configs/infer_workflow.example.yaml`
+- `main/configs/rd_imaging.example.yaml`
 - `main/include/workflow/**`
 - `main/README.md`
 - `ARCHITECTURE_TEMPLATE.md`
@@ -101,7 +107,7 @@
 
 ### 5.2 RD 模块
 
-- 继续读取 `configs/rd_imaging.yaml`
+- 继续读取由 `configs/rd_imaging.example.yaml` bootstrap 的本地 `configs/rd_imaging.yaml`
 - 继续从 `io/echo/*.bin` 读取输入
 - 继续输出到 `io/sar_img/*.png`
 - 继续保留原有 `rd.execution_mode` 选择逻辑：
@@ -113,7 +119,7 @@
 
 ### 5.3 推理模块
 
-- 继续读取 `configs/infer_workflow.yaml`
+- 继续读取由 `configs/infer_workflow.example.yaml` bootstrap 的本地 `configs/infer_workflow.yaml`
 - 继续从 `io/sar_img/*.png` 读取输入
 - 继续按以下规则扫描 patch：
   - `patch_size=512`
