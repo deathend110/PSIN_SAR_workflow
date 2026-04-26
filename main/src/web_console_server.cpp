@@ -25,16 +25,6 @@ namespace workflow::web
 {
     namespace
     {
-        struct HttpRequest
-        {
-            std::string method;
-            std::string target;
-            std::string path;
-            std::string query;
-            std::unordered_map<std::string, std::string> headers;
-            std::string body;
-        };
-
         int socketSendFlags()
         {
             int flags = 0;
@@ -74,94 +64,95 @@ namespace workflow::web
             return sendAll(fd, data.data(), data.size());
         }
 
-        std::string trimHeaderValue(std::string value)
+        bool waitForReadable(int fd, int timeout_ms)
         {
-            while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' '))
+            while (true)
             {
-                value.pop_back();
+                fd_set readfds;
+                FD_ZERO(&readfds);
+                FD_SET(fd, &readfds);
+
+                timeval timeout{};
+                timeout.tv_sec = timeout_ms / 1000;
+                timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+                const int ready = ::select(fd + 1, &readfds, nullptr, nullptr, &timeout);
+                if (ready < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    throw std::runtime_error("Failed to wait for HTTP request data.");
+                }
+                return ready > 0;
             }
-            while (!value.empty() && value.front() == ' ')
-            {
-                value.erase(value.begin());
-            }
-            return value;
         }
 
-        HttpRequest parseRequest(int fd)
+        detail::HttpRequest parseRequest(int fd)
         {
+            const detail::HttpRequestLimits &limits = detail::DefaultHttpRequestLimits();
             std::string raw;
             char buffer[4096];
             size_t header_end = std::string::npos;
+            bool header_parsed = false;
+            detail::HttpRequest request;
 
-            while ((header_end = raw.find("\r\n\r\n")) == std::string::npos)
+            while (true)
             {
-                const ssize_t read_bytes = ::recv(fd, buffer, sizeof(buffer), 0);
-                if (read_bytes <= 0)
+                if (header_parsed)
                 {
+                    request.body = raw.substr(header_end + 4);
+                    if (request.body.size() >= request.content_length)
+                    {
+                        if (request.body.size() > request.content_length)
+                        {
+                            request.body.resize(request.content_length);
+                        }
+                        return request;
+                    }
+                }
+
+                if (!waitForReadable(fd, limits.read_timeout_ms))
+                {
+                    throw detail::HttpRequestError(detail::HttpRequestErrorKind::Timeout,
+                                                   "Timed out while reading the HTTP request.");
+                }
+
+                const ssize_t read_bytes = ::recv(fd, buffer, sizeof(buffer), 0);
+                if (read_bytes < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
                     throw std::runtime_error("Failed to read HTTP request.");
                 }
+                if (read_bytes == 0)
+                {
+                    throw detail::HttpRequestError(detail::HttpRequestErrorKind::BadRequest,
+                                                   "Client closed the connection before the HTTP request completed.");
+                }
+
                 raw.append(buffer, static_cast<size_t>(read_bytes));
-            }
 
-            HttpRequest request;
-            std::istringstream stream(raw.substr(0, header_end));
-            std::string request_line;
-            if (!std::getline(stream, request_line))
-            {
-                throw std::runtime_error("Invalid HTTP request line.");
-            }
-            request_line = trimHeaderValue(request_line);
-
-            std::istringstream request_line_stream(request_line);
-            request_line_stream >> request.method >> request.target;
-            if (request.method.empty() || request.target.empty())
-            {
-                throw std::runtime_error("Invalid HTTP request line.");
-            }
-
-            const size_t query_pos = request.target.find('?');
-            request.path = query_pos == std::string::npos ? request.target : request.target.substr(0, query_pos);
-            request.query = query_pos == std::string::npos ? std::string() : request.target.substr(query_pos + 1);
-
-            std::string line;
-            while (std::getline(stream, line))
-            {
-                line = trimHeaderValue(line);
-                if (line.empty())
+                if (!header_parsed)
                 {
-                    continue;
-                }
-                const size_t colon = line.find(':');
-                if (colon == std::string::npos)
-                {
-                    continue;
-                }
-                const std::string key = line.substr(0, colon);
-                request.headers[workflow::shared::ToLower(key)] = trimHeaderValue(line.substr(colon + 1));
-            }
+                    header_end = raw.find("\r\n\r\n");
+                    if (header_end == std::string::npos)
+                    {
+                        if (raw.size() > limits.max_header_bytes)
+                        {
+                            throw detail::HttpRequestError(detail::HttpRequestErrorKind::PayloadTooLarge,
+                                                           "Request headers exceed the configured limit.");
+                        }
+                        continue;
+                    }
 
-            size_t content_length = 0;
-            if (const auto it = request.headers.find("content-length"); it != request.headers.end())
-            {
-                content_length = static_cast<size_t>(std::stoul(it->second));
-            }
-
-            request.body = raw.substr(header_end + 4);
-            while (request.body.size() < content_length)
-            {
-                const ssize_t read_bytes = ::recv(fd, buffer, sizeof(buffer), 0);
-                if (read_bytes <= 0)
-                {
-                    throw std::runtime_error("Failed to read HTTP request body.");
+                    request = detail::ParseHttpRequestHeaderBlock(raw.substr(0, header_end), limits);
+                    header_parsed = true;
                 }
-                request.body.append(buffer, static_cast<size_t>(read_bytes));
             }
-            if (request.body.size() > content_length)
-            {
-                request.body.resize(content_length);
-            }
-
-            return request;
         }
 
         std::string makeHttpResponse(const std::string &status,
@@ -367,7 +358,7 @@ namespace workflow::web
         bool keep_open = false;
         try
         {
-            const HttpRequest request = parseRequest(client_fd);
+            const detail::HttpRequest request = parseRequest(client_fd);
             const auto query = ParseQueryString(request.query);
 
             if (request.method == "GET" && request.path == "/")
@@ -493,6 +484,12 @@ namespace workflow::web
                                                        "application/json; charset=utf-8",
                                                        MakeErrorResponse("not_found", "Unknown route.")));
             }
+        }
+        catch (const detail::HttpRequestError &e)
+        {
+            sendString(client_fd, makeHttpResponse(detail::MapHttpRequestStatus(e.kind()),
+                                                   "application/json; charset=utf-8",
+                                                   MakeErrorResponse(detail::MapHttpRequestErrorCode(e.kind()), e.what())));
         }
         catch (const std::exception &e)
         {
