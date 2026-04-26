@@ -4,10 +4,86 @@
 #include "workflow/rd/rd_config.hpp"
 #include "workflow/shared/run_control.hpp"
 
+#include <cstddef>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace workflow::web::detail
+{
+    struct HttpRequest
+    {
+        std::string method;
+        std::string target;
+        std::string path;
+        std::string query;
+        std::unordered_map<std::string, std::string> headers;
+        std::string body;
+        size_t content_length = 0;
+    };
+
+    struct HttpRequestLimits
+    {
+        size_t max_header_bytes;
+        size_t max_body_bytes;
+        int read_timeout_ms;
+    };
+
+    enum class HttpRequestErrorKind
+    {
+        BadRequest,
+        Timeout,
+        PayloadTooLarge
+    };
+
+    class HttpRequestError : public std::runtime_error
+    {
+    public:
+        HttpRequestError(HttpRequestErrorKind kind, const std::string &message)
+            : std::runtime_error(message), kind_(kind)
+        {
+        }
+
+        HttpRequestErrorKind kind() const noexcept
+        {
+            return kind_;
+        }
+
+    private:
+        HttpRequestErrorKind kind_;
+    };
+
+    enum class WebConsoleRoute
+    {
+        Index,
+        AppJs,
+        AppCss,
+        ApiState,
+        ApiSettingsGet,
+        ApiSources,
+        ApiSourcePreview,
+        Events,
+        ApiSelection,
+        ApiSettingsPost,
+        ApiCommandStart,
+        ApiCommandPause,
+        ApiCommandStop,
+        ApiCommandReset,
+        ApiCommandShutdownWeb,
+        ApiManualKey,
+        Unknown
+    };
+
+    const HttpRequestLimits &DefaultHttpRequestLimits();
+    std::string MapHttpRequestStatus(HttpRequestErrorKind kind);
+    std::string MapHttpRequestErrorCode(HttpRequestErrorKind kind);
+    size_t ParseContentLengthValue(const std::string &raw_value, const HttpRequestLimits &limits);
+    HttpRequest ParseHttpRequestHeaderBlock(const std::string &raw_header, const HttpRequestLimits &limits);
+    HttpRequest ReadHttpRequestFromSocket(int fd);
+    WebConsoleRoute MatchWebConsoleRoute(const HttpRequest &request);
+}
 
 namespace workflow::web
 {

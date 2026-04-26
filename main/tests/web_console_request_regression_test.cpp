@@ -1,4 +1,4 @@
-#include "workflow/web/web_console_server.hpp"
+#include "workflow/web/web_console_protocol.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -130,13 +130,15 @@ namespace
                "timeout should map to request_timeout");
     }
 
-    void TestServerReadPathStillUsesSelectTimeout()
+    void TestProtocolReadPathStillUsesSelectTimeout()
     {
-        const auto source_path = FindRepoFile("main/src/web_console_server.cpp");
+        const auto source_path = FindRepoFile("main/src/web_console_protocol.cpp");
         const std::string source = ReadFileText(source_path);
 
+        Expect(source.find("ReadHttpRequestFromSocket(") != std::string::npos,
+               "protocol request read path should stay in a named helper");
         Expect(source.find("::select(") != std::string::npos,
-               "server request read path should use select() for timeout enforcement");
+               "protocol request read path should use select() for timeout enforcement");
     }
 }
 
@@ -146,7 +148,7 @@ int main()
     TestOversizedHeaderMapsTo413();
     TestOversizedBodyMapsTo413();
     TestTimeoutMapsTo408();
-    TestServerReadPathStillUsesSelectTimeout();
+    TestProtocolReadPathStillUsesSelectTimeout();
     std::cout << "web_console_request_regression_test passed\n";
     return 0;
 }

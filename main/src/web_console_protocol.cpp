@@ -2,7 +2,15 @@
 
 #include "workflow/shared/config_utils.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
@@ -172,6 +180,278 @@ namespace workflow::web
             {
                 oss << value;
             }
+        }
+
+        bool waitForReadable(int fd, int timeout_ms)
+        {
+            while (true)
+            {
+                fd_set readfds;
+                FD_ZERO(&readfds);
+                FD_SET(fd, &readfds);
+
+                timeval timeout{};
+                timeout.tv_sec = timeout_ms / 1000;
+                timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+                const int ready = ::select(fd + 1, &readfds, nullptr, nullptr, &timeout);
+                if (ready < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    throw std::runtime_error("Failed to wait for HTTP request data.");
+                }
+                return ready > 0;
+            }
+        }
+
+        std::string TrimHttpToken(std::string value)
+        {
+            while (!value.empty() &&
+                   (value.back() == '\r' || value.back() == '\n' || value.back() == ' ' || value.back() == '\t'))
+            {
+                value.pop_back();
+            }
+            size_t offset = 0;
+            while (offset < value.size() && (value[offset] == ' ' || value[offset] == '\t'))
+            {
+                ++offset;
+            }
+            return value.substr(offset);
+        }
+
+        std::string ToLowerAscii(std::string value)
+        {
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            return value;
+        }
+    }
+
+    namespace detail
+    {
+        const HttpRequestLimits &DefaultHttpRequestLimits()
+        {
+            static const HttpRequestLimits limits{8 * 1024, 1024 * 1024, 5000};
+            return limits;
+        }
+
+        std::string MapHttpRequestStatus(HttpRequestErrorKind kind)
+        {
+            switch (kind)
+            {
+            case HttpRequestErrorKind::BadRequest:
+                return "400 Bad Request";
+            case HttpRequestErrorKind::Timeout:
+                return "408 Request Timeout";
+            case HttpRequestErrorKind::PayloadTooLarge:
+                return "413 Payload Too Large";
+            }
+            return "400 Bad Request";
+        }
+
+        std::string MapHttpRequestErrorCode(HttpRequestErrorKind kind)
+        {
+            switch (kind)
+            {
+            case HttpRequestErrorKind::BadRequest:
+                return "invalid_request";
+            case HttpRequestErrorKind::Timeout:
+                return "request_timeout";
+            case HttpRequestErrorKind::PayloadTooLarge:
+                return "request_too_large";
+            }
+            return "invalid_request";
+        }
+
+        size_t ParseContentLengthValue(const std::string &raw_value, const HttpRequestLimits &limits)
+        {
+            const std::string value = TrimHttpToken(raw_value);
+            if (value.empty())
+            {
+                throw HttpRequestError(HttpRequestErrorKind::BadRequest, "Content-Length is required for request bodies.");
+            }
+            if (!std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; }))
+            {
+                throw HttpRequestError(HttpRequestErrorKind::BadRequest, "Content-Length must be an unsigned integer.");
+            }
+
+            size_t content_length = 0;
+            try
+            {
+                content_length = static_cast<size_t>(std::stoull(value));
+            }
+            catch (const std::exception &)
+            {
+                throw HttpRequestError(HttpRequestErrorKind::BadRequest, "Content-Length must be an unsigned integer.");
+            }
+
+            if (content_length > limits.max_body_bytes)
+            {
+                throw HttpRequestError(HttpRequestErrorKind::PayloadTooLarge, "Request body exceeds the configured limit.");
+            }
+            return content_length;
+        }
+
+        HttpRequest ParseHttpRequestHeaderBlock(const std::string &raw_header, const HttpRequestLimits &limits)
+        {
+            if (raw_header.size() > limits.max_header_bytes)
+            {
+                throw HttpRequestError(HttpRequestErrorKind::PayloadTooLarge, "Request headers exceed the configured limit.");
+            }
+
+            HttpRequest request;
+            std::istringstream stream(raw_header);
+            std::string request_line;
+            if (!std::getline(stream, request_line))
+            {
+                throw HttpRequestError(HttpRequestErrorKind::BadRequest, "Invalid HTTP request line.");
+            }
+            request_line = TrimHttpToken(request_line);
+
+            std::istringstream request_line_stream(request_line);
+            request_line_stream >> request.method >> request.target;
+            if (request.method.empty() || request.target.empty())
+            {
+                throw HttpRequestError(HttpRequestErrorKind::BadRequest, "Invalid HTTP request line.");
+            }
+
+            const size_t query_pos = request.target.find('?');
+            request.path = query_pos == std::string::npos ? request.target : request.target.substr(0, query_pos);
+            request.query = query_pos == std::string::npos ? std::string() : request.target.substr(query_pos + 1);
+
+            std::string line;
+            while (std::getline(stream, line))
+            {
+                line = TrimHttpToken(line);
+                if (line.empty())
+                {
+                    continue;
+                }
+                const size_t colon = line.find(':');
+                if (colon == std::string::npos)
+                {
+                    continue;
+                }
+                const std::string key = ToLowerAscii(line.substr(0, colon));
+                request.headers[key] = TrimHttpToken(line.substr(colon + 1));
+            }
+
+            if (const auto it = request.headers.find("content-length"); it != request.headers.end())
+            {
+                request.content_length = ParseContentLengthValue(it->second, limits);
+            }
+
+            return request;
+        }
+
+        HttpRequest ReadHttpRequestFromSocket(int fd)
+        {
+            const HttpRequestLimits &limits = DefaultHttpRequestLimits();
+            std::string raw;
+            char buffer[4096];
+            size_t header_end = std::string::npos;
+            bool header_parsed = false;
+            HttpRequest request;
+
+            while (true)
+            {
+                if (header_parsed)
+                {
+                    request.body = raw.substr(header_end + 4);
+                    if (request.body.size() >= request.content_length)
+                    {
+                        if (request.body.size() > request.content_length)
+                        {
+                            request.body.resize(request.content_length);
+                        }
+                        return request;
+                    }
+                }
+
+                if (!waitForReadable(fd, limits.read_timeout_ms))
+                {
+                    throw HttpRequestError(HttpRequestErrorKind::Timeout,
+                                           "Timed out while reading the HTTP request.");
+                }
+
+                const ssize_t read_bytes = ::recv(fd, buffer, sizeof(buffer), 0);
+                if (read_bytes < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    throw std::runtime_error("Failed to read HTTP request.");
+                }
+                if (read_bytes == 0)
+                {
+                    throw HttpRequestError(HttpRequestErrorKind::BadRequest,
+                                           "Client closed the connection before the HTTP request completed.");
+                }
+
+                raw.append(buffer, static_cast<size_t>(read_bytes));
+
+                if (!header_parsed)
+                {
+                    header_end = raw.find("\r\n\r\n");
+                    if (header_end == std::string::npos)
+                    {
+                        if (raw.size() > limits.max_header_bytes)
+                        {
+                            throw HttpRequestError(HttpRequestErrorKind::PayloadTooLarge,
+                                                   "Request headers exceed the configured limit.");
+                        }
+                        continue;
+                    }
+
+                    request = ParseHttpRequestHeaderBlock(raw.substr(0, header_end), limits);
+                    header_parsed = true;
+                }
+            }
+        }
+
+        WebConsoleRoute MatchWebConsoleRoute(const HttpRequest &request)
+        {
+            const bool is_get = request.method == "GET";
+            const bool is_post = request.method == "POST";
+
+            if (is_get && request.path == "/")
+                return WebConsoleRoute::Index;
+            if (is_get && request.path == "/app.js")
+                return WebConsoleRoute::AppJs;
+            if (is_get && request.path == "/app.css")
+                return WebConsoleRoute::AppCss;
+            if (is_get && request.path == "/api/state")
+                return WebConsoleRoute::ApiState;
+            if (is_get && request.path == "/api/settings")
+                return WebConsoleRoute::ApiSettingsGet;
+            if (is_get && request.path == "/api/sources")
+                return WebConsoleRoute::ApiSources;
+            if (is_get && request.path == "/api/source/preview")
+                return WebConsoleRoute::ApiSourcePreview;
+            if (is_get && request.path == "/events")
+                return WebConsoleRoute::Events;
+            if (is_post && request.path == "/api/selection")
+                return WebConsoleRoute::ApiSelection;
+            if (is_post && request.path == "/api/settings")
+                return WebConsoleRoute::ApiSettingsPost;
+            if (is_post && request.path == "/api/command/start")
+                return WebConsoleRoute::ApiCommandStart;
+            if (is_post && request.path == "/api/command/pause")
+                return WebConsoleRoute::ApiCommandPause;
+            if (is_post && request.path == "/api/command/stop")
+                return WebConsoleRoute::ApiCommandStop;
+            if (is_post && request.path == "/api/command/reset")
+                return WebConsoleRoute::ApiCommandReset;
+            if (is_post && request.path == "/api/command/shutdown_web")
+                return WebConsoleRoute::ApiCommandShutdownWeb;
+            if (is_post && request.path == "/api/manual/key")
+                return WebConsoleRoute::ApiManualKey;
+            return WebConsoleRoute::Unknown;
         }
     }
 
