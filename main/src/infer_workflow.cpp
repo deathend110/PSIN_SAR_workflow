@@ -155,6 +155,26 @@ namespace workflow::infer
             MiniMapContext mini_map;
         };
 
+        struct StatusBadgeStyle
+        {
+            cv::Scalar dot_color;
+            cv::Scalar text_color;
+        };
+
+        StatusBadgeStyle resolveStatusBadgeStyle(const std::string &status_label)
+        {
+            const cv::Scalar running_dot_color(94, 197, 34);
+            const cv::Scalar running_text_color(52, 101, 22);
+            const cv::Scalar stopped_dot_color(52, 52, 235);
+            const cv::Scalar stopped_text_color(36, 36, 182);
+
+            if (status_label == "STOPPED")
+            {
+                return {stopped_dot_color, stopped_text_color};
+            }
+            return {running_dot_color, running_text_color};
+        }
+
         struct InferenceSnapshot
         {
             RuntimeState state;
@@ -1653,10 +1673,8 @@ namespace workflow::infer
         const cv::Scalar border_color(184, 172, 162);
         const cv::Scalar title_color(42, 23, 15);
         const cv::Scalar subtitle_color(105, 85, 71);
-        const cv::Scalar success_color(94, 197, 34);
         const cv::Scalar badge_bg(251, 248, 246);
         const cv::Scalar badge_text_color(85, 65, 51);
-        const cv::Scalar running_text_color(52, 101, 22);
         const cv::Scalar patch_color(172, 239, 134);
         const cv::Scalar current_point_color(68, 68, 239);
         const cv::Scalar outer_border_color(175, 163, 154);
@@ -1666,6 +1684,7 @@ namespace workflow::infer
         const cv::Scalar restore_body_bg(245, 241, 237);
         const cv::Scalar seg_body_bg(234, 227, 221);
         const cv::Scalar seg_grid_color(255, 255, 255);
+        const StatusBadgeStyle status_badge_style = resolveStatusBadgeStyle(ui_context.status_label);
 
         cv::Mat canvas(height, width, CV_8UC3, shell_bg);
         const int margin = std::max(10, std::min(width, height) / 48);
@@ -1710,7 +1729,7 @@ namespace workflow::infer
                 cv::circle(canvas,
                            cv::Point(badge_rect.x + 14, badge_rect.y + badge_rect.height / 2),
                            std::max(3, badge_rect.height / 9),
-                           success_color,
+                           status_badge_style.dot_color,
                            cv::FILLED,
                            cv::LINE_AA);
                 text_x = badge_rect.x + 28;
@@ -1730,7 +1749,7 @@ namespace workflow::infer
         badge_x -= badge_gap + badge_width;
         drawBadge(badge_x, "MODE / " + ui_context.mode_label, badge_text_color, false);
         badge_x -= badge_gap + badge_width;
-        drawBadge(badge_x, ui_context.status_label, running_text_color, true);
+        drawBadge(badge_x, ui_context.status_label, status_badge_style.text_color, true);
 
         const int content_top = header_rect.br().y + gap;
         const int content_bottom = shell_rect.br().y - footer_height - gap;
@@ -2199,6 +2218,34 @@ namespace workflow::infer
                 InferenceSnapshot current_snapshot;
                 std::uint64_t current_sequence = 0;
                 auto next_present_time = std::chrono::steady_clock::now();
+                auto emitStoppedFrame = [&]() {
+                    UiRenderContext stopped_ui = current_snapshot.ui_context;
+                    RuntimeState stopped_state = current_state;
+                    cv::Mat stopped_restore = current_snapshot.restore_bgr;
+                    cv::Mat stopped_mask = current_snapshot.mask_bgr;
+
+                    if (stopped_ui.output_label.empty())
+                    {
+                        stopped_ui = placeholder_ui_context_;
+                    }
+                    if (stopped_restore.empty())
+                    {
+                        stopped_restore = empty_restore;
+                    }
+                    if (stopped_mask.empty())
+                    {
+                        stopped_mask = empty_mask;
+                    }
+
+                    stopped_ui.status_label = "STOPPED";
+                    cv::Mat stopped_frame = composeIndustrialUiFrame(stopped_ui,
+                                                                     stopped_state,
+                                                                     stopped_restore,
+                                                                     stopped_mask,
+                                                                     display_width_,
+                                                                     display_height_);
+                    writeFrame(stopped_state, stopped_frame);
+                };
 
                 while (true)
                 {
@@ -2222,6 +2269,7 @@ namespace workflow::infer
                     const auto wake_reason = mailbox_.waitForChangeOrStop(current_sequence, wait_timeout);
                     if (wake_reason == LatestSnapshotMailbox::WakeReason::StopRequested)
                     {
+                        emitStoppedFrame();
                         return;
                     }
 
@@ -2243,6 +2291,7 @@ namespace workflow::infer
 
                     if (wake_reason == LatestSnapshotMailbox::WakeReason::InputClosed)
                     {
+                        emitStoppedFrame();
                         return;
                     }
                 }
