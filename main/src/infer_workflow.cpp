@@ -1,6 +1,7 @@
 #include "infer_workflow_hdmi_display.hpp"
 #include "workflow/infer/infer_config.hpp"
 #include "workflow/infer/infer_workflow.hpp"
+#include "workflow/infer/manual_flight_runtime.hpp"
 #include "workflow/shared/config_utils.hpp"
 #include <icraft-backends/hostbackend/backend.h>
 #include <icraft-backends/hostbackend/utils.h>
@@ -183,125 +184,60 @@ namespace workflow::infer
             cv::Mat mask_bgr;
         };
 
-        struct ManualFlightSharedState
+        struct ManualFlightCoordinatorState
         {
             std::mutex mutex;
-            std::condition_variable cv;
             ManualFlightSettings settings;
             bool configured = false;
-            bool active = false;
-            bool paused = false;
-            int image_width = 0;
-            int image_height = 0;
-            int patch_size = kExpectedH;
-            int stride = 256;
-            cv::Point current_center{0, 0};
-            cv::Point requested_center{0, 0};
-            cv::Point last_inferred_center{0, 0};
-            std::uint64_t request_sequence = 0;
-            std::uint64_t consumed_sequence = 0;
-            bool edge_blocked = false;
-            int patch_count = 0;
-            std::string current_direction = "right";
-            std::string pending_direction = "right";
-            std::vector<cv::Point> path_points;
+            std::shared_ptr<ManualFlightRuntimeState> runtime;
         };
 
-        ManualFlightSharedState &manualFlightSharedState()
+        ManualFlightCoordinatorState &manualFlightCoordinatorState()
         {
-            static ManualFlightSharedState state;
+            static ManualFlightCoordinatorState state;
             return state;
         }
 
-        cv::Point clampManualCenter(const cv::Point &point, int image_width, int image_height, int patch_size)
+        std::shared_ptr<ManualFlightRuntimeState> activeManualFlightRuntimeState()
         {
-            const int half = patch_size / 2;
-            const int x = std::max(half, std::min(point.x, image_width - half));
-            const int y = std::max(half, std::min(point.y, image_height - half));
-            return cv::Point(x, y);
+            auto &coordinator = manualFlightCoordinatorState();
+            std::lock_guard<std::mutex> lock(coordinator.mutex);
+            return coordinator.runtime;
         }
 
-        bool isManualDirection(const std::string &value)
+        void syncManualFlightRuntimeConfiguration(const std::shared_ptr<ManualFlightRuntimeState> &runtime)
         {
-            return value == "up" || value == "left" || value == "down" || value == "right";
+            if (runtime == nullptr)
+            {
+                return;
+            }
+
+            ManualFlightSettings settings;
+            bool configured = false;
+            {
+                auto &coordinator = manualFlightCoordinatorState();
+                std::lock_guard<std::mutex> lock(coordinator.mutex);
+                settings = coordinator.settings;
+                configured = coordinator.configured;
+            }
+
+            runtime->setConfiguration(settings, configured);
         }
 
-        std::string normalizeManualDirectionKey(const std::string &key)
+        void registerManualFlightRuntimeState(const std::shared_ptr<ManualFlightRuntimeState> &runtime)
         {
-            const std::string lowered = shared::ToLower(shared::Trim(key));
-            if (lowered == "w")
-            {
-                return "up";
-            }
-            if (lowered == "a")
-            {
-                return "left";
-            }
-            if (lowered == "s")
-            {
-                return "down";
-            }
-            if (lowered == "d")
-            {
-                return "right";
-            }
-            return {};
+            auto &coordinator = manualFlightCoordinatorState();
+            std::lock_guard<std::mutex> lock(coordinator.mutex);
+            coordinator.runtime = runtime;
         }
 
-        cv::Point manualDirectionDelta(const std::string &direction)
+        void unregisterManualFlightRuntimeState(const std::shared_ptr<ManualFlightRuntimeState> &runtime)
         {
-            if (direction == "up")
+            auto &coordinator = manualFlightCoordinatorState();
+            std::lock_guard<std::mutex> lock(coordinator.mutex);
+            if (coordinator.runtime == runtime)
             {
-                return cv::Point(0, -1);
-            }
-            if (direction == "left")
-            {
-                return cv::Point(-1, 0);
-            }
-            if (direction == "down")
-            {
-                return cv::Point(0, 1);
-            }
-            return cv::Point(1, 0);
-        }
-
-        cv::Point computeNextManualCenter(const ManualFlightSharedState &state, const std::string &direction)
-        {
-            const cv::Point delta = manualDirectionDelta(direction);
-            return clampManualCenter(cv::Point(state.current_center.x + delta.x * std::max(1, state.stride),
-                                               state.current_center.y + delta.y * std::max(1, state.stride)),
-                                     state.image_width,
-                                     state.image_height,
-                                     state.patch_size);
-        }
-
-        void trimManualPath(std::vector<cv::Point> &path_points);
-
-        bool queueNextManualPatchLocked(ManualFlightSharedState &state)
-        {
-            state.current_direction = state.pending_direction;
-            const cv::Point next_center = computeNextManualCenter(state, state.current_direction);
-            if (next_center == state.current_center)
-            {
-                state.edge_blocked = true;
-                return false;
-            }
-
-            state.edge_blocked = false;
-            state.current_center = next_center;
-            state.requested_center = next_center;
-            state.path_points.push_back(next_center);
-            trimManualPath(state.path_points);
-            ++state.request_sequence;
-            return true;
-        }
-
-        void trimManualPath(std::vector<cv::Point> &path_points)
-        {
-            constexpr size_t kMaxPathPoints = 256;
-            if (path_points.size() > kMaxPathPoints)
-            {
-                path_points.erase(path_points.begin(), path_points.end() - static_cast<std::ptrdiff_t>(kMaxPathPoints));
+                coordinator.runtime.reset();
             }
         }
 
@@ -352,64 +288,44 @@ namespace workflow::infer
 
     void ConfigureManualFlight(const ManualFlightSettings &settings)
     {
-        auto &manual_shared = manualFlightSharedState();
+        std::shared_ptr<ManualFlightRuntimeState> runtime;
         {
-            std::lock_guard<std::mutex> lock(manual_shared.mutex);
-            manual_shared.settings = settings;
-            manual_shared.configured = true;
+            auto &coordinator = manualFlightCoordinatorState();
+            std::lock_guard<std::mutex> lock(coordinator.mutex);
+            coordinator.settings = settings;
+            coordinator.configured = true;
+            runtime = coordinator.runtime;
         }
-        manual_shared.cv.notify_all();
+        if (runtime != nullptr)
+        {
+            runtime->configure(settings);
+        }
     }
 
     void ResetManualFlight()
     {
-        auto &manual_shared = manualFlightSharedState();
+        const auto runtime = activeManualFlightRuntimeState();
+        if (runtime == nullptr)
         {
-            std::lock_guard<std::mutex> lock(manual_shared.mutex);
-            const cv::Point reset_center(kExpectedH / 2, kExpectedH / 2);
-            manual_shared.active = false;
-            manual_shared.paused = false;
-            manual_shared.image_width = 0;
-            manual_shared.image_height = 0;
-            manual_shared.patch_size = kExpectedH;
-            manual_shared.stride = 256;
-            manual_shared.current_center = reset_center;
-            manual_shared.requested_center = reset_center;
-            manual_shared.last_inferred_center = reset_center;
-            manual_shared.request_sequence = 0;
-            manual_shared.consumed_sequence = 0;
-            manual_shared.edge_blocked = false;
-            manual_shared.patch_count = 0;
-            manual_shared.current_direction = "right";
-            manual_shared.pending_direction = "right";
-            manual_shared.path_points.clear();
+            return;
         }
-        manual_shared.cv.notify_all();
+        runtime->reset();
     }
 
     void SetManualFlightPaused(bool paused)
     {
-        auto &manual_shared = manualFlightSharedState();
+        const auto runtime = activeManualFlightRuntimeState();
+        if (runtime == nullptr)
         {
-            std::lock_guard<std::mutex> lock(manual_shared.mutex);
-            manual_shared.paused = paused;
-            if (!paused &&
-                manual_shared.active &&
-                manual_shared.request_sequence <= manual_shared.consumed_sequence)
-            {
-                queueNextManualPatchLocked(manual_shared);
-            }
+            return;
         }
-        manual_shared.cv.notify_all();
+        runtime->setPaused(paused);
     }
 
     bool SubmitManualFlightKey(const std::string &key, bool pressed, std::string *message)
     {
-        auto &manual_shared = manualFlightSharedState();
-        const std::string direction = normalizeManualDirectionKey(key);
-
-        std::lock_guard<std::mutex> lock(manual_shared.mutex);
-        if (!manual_shared.active)
+        const auto runtime = activeManualFlightRuntimeState();
+        if (runtime == nullptr)
         {
             if (message != nullptr)
             {
@@ -417,71 +333,21 @@ namespace workflow::infer
             }
             return false;
         }
-
-        if (!pressed)
-        {
-            if (message != nullptr)
-            {
-                *message = "manual direction release ignored in cursor mode.";
-            }
-            return true;
-        }
-
-        if (!isManualDirection(direction))
-        {
-            if (message != nullptr)
-            {
-                *message = "manual_flight only accepts W/A/S/D direction changes.";
-            }
-            return false;
-        }
-
-        if (manual_shared.pending_direction == direction)
-        {
-            if (message != nullptr)
-            {
-                *message = "manual direction unchanged.";
-            }
-            return true;
-        }
-
-        manual_shared.pending_direction = direction;
-
-        if (manual_shared.edge_blocked &&
-            !manual_shared.paused &&
-            manual_shared.request_sequence <= manual_shared.consumed_sequence)
-        {
-            queueNextManualPatchLocked(manual_shared);
-        }
-
-        if (message != nullptr)
-        {
-            *message = "manual direction set to " + direction + ".";
-        }
-        manual_shared.cv.notify_all();
-        return true;
+        return runtime->submitDirectionKey(key, pressed, message);
     }
 
     ManualFlightTelemetry GetManualFlightTelemetry()
     {
-        auto &manual_shared = manualFlightSharedState();
-        std::lock_guard<std::mutex> lock(manual_shared.mutex);
-
-        ManualFlightTelemetry telemetry;
-        telemetry.configured = manual_shared.configured;
-        telemetry.active = manual_shared.active;
-        telemetry.paused = manual_shared.paused;
-        telemetry.path_overlay = manual_shared.settings.path_overlay;
-        telemetry.edge_blocked = manual_shared.edge_blocked;
-        telemetry.position_x = manual_shared.current_center.x;
-        telemetry.position_y = manual_shared.current_center.y;
-        telemetry.last_inferred_center_x = manual_shared.last_inferred_center.x;
-        telemetry.last_inferred_center_y = manual_shared.last_inferred_center.y;
-        telemetry.path_points = static_cast<int>(manual_shared.path_points.size());
-        telemetry.patch_count = manual_shared.patch_count;
-        telemetry.current_direction = manual_shared.current_direction;
-        telemetry.pending_direction = manual_shared.pending_direction;
-        return telemetry;
+        const auto runtime = activeManualFlightRuntimeState();
+        if (runtime == nullptr)
+        {
+            auto &coordinator = manualFlightCoordinatorState();
+            std::lock_guard<std::mutex> lock(coordinator.mutex);
+            ManualFlightRuntimeState idle_runtime;
+            idle_runtime.setConfiguration(coordinator.settings, coordinator.configured);
+            return idle_runtime.telemetry();
+        }
+        return runtime->telemetry();
     }
 
     namespace
@@ -930,104 +796,58 @@ namespace workflow::infer
     {
     public:
         ManualFlightRuntime(cv::Mat image_norm, int patch_size, int stride)
-            : image_norm_(std::move(image_norm)), patch_size_(patch_size), stride_(std::max(1, stride))
+            : image_norm_(std::move(image_norm)),
+              patch_size_(patch_size),
+              stride_(std::max(1, stride)),
+              state_(std::make_shared<ManualFlightRuntimeState>())
         {
             if (image_norm_.cols < patch_size_ || image_norm_.rows < patch_size_)
             {
                 throw std::runtime_error("ManualFlightRuntime image is smaller than patch size.");
             }
-            initializeSharedState();
+            syncManualFlightRuntimeConfiguration(state_);
+            state_->activate(image_norm_.cols, image_norm_.rows, patch_size_, stride_);
+            registerManualFlightRuntimeState(state_);
+            syncManualFlightRuntimeConfiguration(state_);
         }
 
         ~ManualFlightRuntime()
         {
             requestStop();
-            ResetManualFlight();
+            state_->reset();
+            unregisterManualFlightRuntimeState(state_);
         }
 
         bool waitNextPatch(PatchPacket &packet, shared::WorkflowRunControl *control, int patch_index)
         {
-            auto &shared = manualFlightSharedState();
-            for (;;)
+            cv::Point center;
+            if (!state_->waitNextCenter([&] {
+                    return stop_requested_ || (control != nullptr && control->shouldStop());
+                },
+                center))
             {
-                std::unique_lock<std::mutex> lock(shared.mutex);
-                shared.cv.wait_for(lock, std::chrono::milliseconds(40), [&] {
-                    return stop_requested_ ||
-                           shared.request_sequence > shared.consumed_sequence ||
-                           (control != nullptr && control->shouldStop());
-                });
-
-                if (stop_requested_ || (control != nullptr && control->shouldStop()))
-                {
-                    return false;
-                }
-                if (shared.request_sequence <= shared.consumed_sequence)
-                {
-                    continue;
-                }
-
-                const cv::Point center = shared.requested_center;
-                shared.consumed_sequence = shared.request_sequence;
-                lock.unlock();
-
-                packet = makePacket(center, patch_index);
-                return true;
+                return false;
             }
+            packet = makePacket(center, patch_index);
+            return true;
         }
 
         void markInferenceCommitted(const PatchPacket &packet)
         {
-            auto &shared = manualFlightSharedState();
             const cv::Point center(packet.info.x + packet.info.width / 2, packet.info.y + packet.info.height / 2);
-            {
-                std::lock_guard<std::mutex> lock(shared.mutex);
-                shared.current_center = center;
-                shared.last_inferred_center = center;
-                ++shared.patch_count;
-                if (stop_requested_ || !shared.active || shared.paused)
-                {
-                    return;
-                }
-
-                queueNextManualPatchLocked(shared);
-            }
-            shared.cv.notify_all();
+            state_->markInferenceCommitted(center);
         }
 
         void requestStop()
         {
             stop_requested_ = true;
-            manualFlightSharedState().cv.notify_all();
+            if (state_ != nullptr)
+            {
+                state_->requestStop();
+            }
         }
 
     private:
-        void initializeSharedState()
-        {
-            auto &shared = manualFlightSharedState();
-            const cv::Point initial_center = clampManualCenter(cv::Point(patch_size_ / 2, patch_size_ / 2),
-                                                               image_norm_.cols,
-                                                               image_norm_.rows,
-                                                               patch_size_);
-            std::lock_guard<std::mutex> lock(shared.mutex);
-            shared.active = true;
-            shared.paused = false;
-            shared.image_width = image_norm_.cols;
-            shared.image_height = image_norm_.rows;
-            shared.patch_size = patch_size_;
-            shared.stride = stride_;
-            shared.current_center = initial_center;
-            shared.requested_center = initial_center;
-            shared.last_inferred_center = initial_center;
-            shared.request_sequence = 1;
-            shared.consumed_sequence = 0;
-            shared.edge_blocked = false;
-            shared.patch_count = 0;
-            shared.current_direction = "right";
-            shared.pending_direction = "right";
-            shared.path_points.clear();
-            shared.path_points.push_back(initial_center);
-        }
-
         PatchPacket makePacket(const cv::Point &center, int patch_index) const
         {
             const int half = patch_size_ / 2;
@@ -1048,6 +868,7 @@ namespace workflow::infer
         int patch_size_ = 512;
         int stride_ = 256;
         bool stop_requested_ = false;
+        std::shared_ptr<ManualFlightRuntimeState> state_;
     };
 
     Network loadNetwork(const std::string &json_path, const std::string &raw_path)
@@ -1483,9 +1304,12 @@ namespace workflow::infer
         ui_context.status_label = telemetry.paused ? "PAUSED" : (telemetry.edge_blocked ? "EDGE HOLD" : "RUNNING");
         ui_context.mini_map.path_overlay = telemetry.path_overlay;
 
-        auto &shared = manualFlightSharedState();
-        std::lock_guard<std::mutex> lock(shared.mutex);
-        ui_context.mini_map.path_points = shared.path_points;
+        const auto runtime = activeManualFlightRuntimeState();
+        if (runtime == nullptr)
+        {
+            return;
+        }
+        ui_context.mini_map.path_points = runtime->pathPoints();
     }
 
     cv::Point mapPointToRect(const cv::Point2f &point, const MiniMapContext &context, const cv::Rect &target_rect)
