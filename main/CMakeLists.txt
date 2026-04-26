@@ -84,7 +84,9 @@ add_executable(psin_workflow
     src/rd_config.cpp
     src/rd_imaging_stream.cpp
     src/infer_config.cpp
+    src/infer/patch_planner.cpp
     src/infer/ui_render.cpp
+    src/infer/output_sink.cpp
     src/infer_workflow.cpp
     src/manual_flight_runtime.cpp
     src/web_console.cpp
