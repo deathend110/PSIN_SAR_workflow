@@ -558,6 +558,16 @@ cd main
 - `manual_flight` 使用 latest-wins 方向更新，不维护历史方向 FIFO
 - `stop` 是协作式停止，不是硬抢占中断
 - Web Console 退出前会写回当前 infer / rd / web 配置
+- Web 设置接口会先在内存里完成整批校验，再一次性提交；失败时不会留下部分生效的脏状态
+- 语义非法参数返回 `invalid_settings`
+- 明显超板端预算的参数返回 `board_budget_exceeded`
+- 当前 Web 设置护栏阈值：
+  - `infer.pipeline.patch.patch_size` 必须是 `512`
+  - `infer.pipeline.patch.stride` 必须是正整数；小于 `64` 会被视为超板端预算，大于 `512` 会被视为非法值
+  - `infer.display.width` / `infer.display.height` 必须为正整数，且不超过 `1920x1080`
+  - `infer.display.fps` 允许 `0`，大于 `60` 会被视为超预算
+  - 当显示分辨率超过 `1280x720` 时，`infer.display.fps > 30` 会被视为超预算
+  - `rd.memory_limit_mb` 必须为正整数，且大于 `512` 会被视为超预算
 
 ## 11. 不参与当前主构建 / 主链的文件
 

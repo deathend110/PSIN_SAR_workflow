@@ -40,10 +40,12 @@
 ---
 
 ## 1. 阅读模式
-```text
+加载superpower skill，浏览整个工作区
+
 先不要修改代码。
 加载AGENTS.md为当前工作区agent设置
 顺序阅读以下文件：
+- README.md
 - ARCHITECTURE_TEMPLATE.md
 - CODEBASE_MAP_TEMPLATE.md
 总览main文件下代码，确保你完全理解
@@ -58,7 +60,7 @@
 - 引用具体文件和函数名
 - 不要泛泛而谈
 - 不要提交任何代码修改
-```
+
 
 ---
 

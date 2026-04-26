@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace workflow::web
 {
@@ -16,6 +17,58 @@ namespace workflow::web
 
     namespace
     {
+        struct SettingsValidationError : std::runtime_error
+        {
+            SettingsValidationError(std::string code, std::string message)
+                : std::runtime_error(std::move(message)), code(std::move(code))
+            {
+            }
+
+            std::string code;
+        };
+
+        [[noreturn]] void throwInvalidSettings(const std::string &message)
+        {
+            throw SettingsValidationError("invalid_settings", message);
+        }
+
+        [[noreturn]] void throwBoardBudgetExceeded(const std::string &message)
+        {
+            throw SettingsValidationError("board_budget_exceeded", message);
+        }
+
+        constexpr int kMinBoardStride = 64;
+        constexpr int kMaxBoardDisplayWidth = 1920;
+        constexpr int kMaxBoardDisplayHeight = 1080;
+        constexpr int kMaxBoardDisplayFps = 60;
+        constexpr int kMaxBoardDisplayPixels = kMaxBoardDisplayWidth * kMaxBoardDisplayHeight;
+        constexpr int kMaxBoardDisplayPixelsAtHighFps = 1280 * 720;
+        constexpr int kHighFpsThreshold = 30;
+        constexpr int kMaxBoardMemoryLimitMb = 512;
+
+        int parseStrictInt(const std::string &value, const std::string &field)
+        {
+            const std::string trimmed = shared::Trim(value);
+            size_t consumed = 0;
+            try
+            {
+                const int parsed = std::stoi(trimmed, &consumed);
+                if (consumed != trimmed.size())
+                {
+                    throwInvalidSettings(field + " must be an integer.");
+                }
+                return parsed;
+            }
+            catch (const SettingsValidationError &)
+            {
+                throw;
+            }
+            catch (const std::exception &)
+            {
+                throwInvalidSettings(field + " must be an integer.");
+            }
+        }
+
         bool isValidInferOutputMode(const std::string &value)
         {
             return value == "hdmi" || value == "png";
@@ -26,6 +79,75 @@ namespace workflow::web
             return value == "auto" ||
                    value == "memory_float32" ||
                    value == "scratch_double";
+        }
+
+        void validateSettingsBudget(const infer::AppConfig &infer_cfg, const rd::AppConfig &rd_cfg)
+        {
+            if (infer_cfg.patch_size != infer::kExpectedH || infer_cfg.patch_size != infer::kExpectedW)
+            {
+                throwInvalidSettings("infer.pipeline.patch.patch_size must be 512.");
+            }
+            if (infer_cfg.stride <= 0)
+            {
+                throwInvalidSettings("infer.pipeline.patch.stride must be positive.");
+            }
+            if (infer_cfg.stride > infer::kExpectedW)
+            {
+                throwInvalidSettings("infer.pipeline.patch.stride must not exceed 512.");
+            }
+            if (infer_cfg.stride < kMinBoardStride)
+            {
+                throwBoardBudgetExceeded("infer.pipeline.patch.stride below 64 would exceed the board budget.");
+            }
+            if (infer_cfg.display_width <= 0 || infer_cfg.display_height <= 0)
+            {
+                throwInvalidSettings("infer.display.width and infer.display.height must be positive.");
+            }
+            if (infer_cfg.display_fps < 0)
+            {
+                throwInvalidSettings("infer.display.fps must be zero or positive.");
+            }
+            if (infer_cfg.display_width > kMaxBoardDisplayWidth || infer_cfg.display_height > kMaxBoardDisplayHeight)
+            {
+                throwBoardBudgetExceeded("infer.display width/height exceed the supported board budget.");
+            }
+            if (infer_cfg.display_fps > kMaxBoardDisplayFps)
+            {
+                throwBoardBudgetExceeded("infer.display.fps exceeds the supported board budget.");
+            }
+
+            const long long display_pixels = static_cast<long long>(infer_cfg.display_width) * infer_cfg.display_height;
+            if (display_pixels > kMaxBoardDisplayPixels)
+            {
+                throwBoardBudgetExceeded("infer.display resolution exceeds the supported board budget.");
+            }
+            if (infer_cfg.display_fps > kHighFpsThreshold && display_pixels > kMaxBoardDisplayPixelsAtHighFps)
+            {
+                throwBoardBudgetExceeded("high-FPS display settings exceed the supported board budget.");
+            }
+            if (rd_cfg.column_tile <= 0 || rd_cfg.row_tile <= 0)
+            {
+                throwInvalidSettings("rd.column_tile and rd.row_tile must be positive.");
+            }
+            if (rd_cfg.memory_limit_mb <= 0)
+            {
+                throwInvalidSettings("rd.memory_limit_mb must be positive.");
+            }
+            if (rd_cfg.memory_limit_mb > kMaxBoardMemoryLimitMb)
+            {
+                throwBoardBudgetExceeded("rd.memory_limit_mb exceeds the supported board budget.");
+            }
+        }
+
+        void validateFlightSettings(const FlightSettings &flight_settings)
+        {
+            if (flight_settings.manual_step_px <= 0 ||
+                flight_settings.boost_step_px <= 0 ||
+                flight_settings.trigger_distance_px <= 0 ||
+                flight_settings.cache_grid_px <= 0)
+            {
+                throwInvalidSettings("flight settings must be positive integers.");
+            }
         }
 
         bool isImageFile(const fs::path &path)
@@ -386,172 +508,189 @@ namespace workflow::web
 
             try
             {
+                infer::AppConfig next_infer_cfg = infer_cfg_;
+                rd::AppConfig next_rd_cfg = rd_cfg_;
+                FlightSettings next_flight_settings = flight_settings_;
+                shared::WorkflowSelection next_selection = runtime_snapshot_.selection;
+
                 for (const auto &[key, value] : fields)
                 {
                     if (key == "infer.sys.device")
                     {
-                        infer_cfg_.device_url = value;
+                        next_infer_cfg.device_url = value;
                     }
                     else if (key == "infer.sys.run_backend")
                     {
-                        infer_cfg_.run_backend = value;
+                        next_infer_cfg.run_backend = value;
                     }
                     else if (key == "infer.sys.mmuMode")
                     {
-                        infer_cfg_.mmu_mode = shared::ParseBool(value, key);
+                        next_infer_cfg.mmu_mode = shared::ParseBool(value, key);
                     }
                     else if (key == "infer.sys.speedMode")
                     {
-                        infer_cfg_.speed_mode = shared::ParseBool(value, key);
+                        next_infer_cfg.speed_mode = shared::ParseBool(value, key);
                     }
                     else if (key == "infer.sys.compressFtmp")
                     {
-                        infer_cfg_.compress_ftmp = shared::ParseBool(value, key);
+                        next_infer_cfg.compress_ftmp = shared::ParseBool(value, key);
                     }
                     else if (key == "infer.sys.ocm_option")
                     {
-                        infer_cfg_.ocm_option = std::stoi(value);
+                        next_infer_cfg.ocm_option = parseStrictInt(value, key);
                     }
                     else if (key == "infer.sys.profile")
                     {
-                        infer_cfg_.enable_profile = shared::ParseBool(value, key);
+                        next_infer_cfg.enable_profile = shared::ParseBool(value, key);
                     }
                     else if (key == "infer.input.sar_img_dir")
                     {
-                        infer_cfg_.sar_img_dir = value;
+                        next_infer_cfg.sar_img_dir = value;
                     }
                     else if (key == "infer.input.sar_img_ext")
                     {
-                        infer_cfg_.sar_img_ext = value;
+                        next_infer_cfg.sar_img_ext = value;
                     }
                     else if (key == "infer.input.recursive")
                     {
-                        infer_cfg_.recursive = shared::ParseBool(value, key);
+                        next_infer_cfg.recursive = shared::ParseBool(value, key);
                     }
                     else if (key == "infer.pipeline.patch.mode")
                     {
-                        shared::SelectedPatchMode patch_mode = runtime_snapshot_.selection.patch_mode;
+                        shared::SelectedPatchMode patch_mode = next_selection.patch_mode;
                         if (!ParseSelectedPatchMode(value, patch_mode))
                         {
                             throw std::runtime_error("infer.pipeline.patch.mode must be auto_snake or manual_flight.");
                         }
-                        infer_cfg_.patch_mode = ToString(patch_mode);
-                        runtime_snapshot_.selection.patch_mode = patch_mode;
+                        next_selection.patch_mode = patch_mode;
+                        next_infer_cfg.patch_mode = ToString(patch_mode);
                     }
                     else if (key == "infer.pipeline.patch.patch_size")
                     {
-                        infer_cfg_.patch_size = std::stoi(value);
+                        next_infer_cfg.patch_size = parseStrictInt(value, key);
                     }
                     else if (key == "infer.pipeline.patch.stride")
                     {
-                        infer_cfg_.stride = std::stoi(value);
+                        next_infer_cfg.stride = parseStrictInt(value, key);
                     }
                     else if (key == "infer.pipeline.output_wait_ms")
                     {
-                        infer_cfg_.output_wait_ms = std::stoi(value);
+                        next_infer_cfg.output_wait_ms = parseStrictInt(value, key);
                     }
                     else if (key == "infer.display.width")
                     {
-                        infer_cfg_.display_width = std::stoi(value);
+                        next_infer_cfg.display_width = parseStrictInt(value, key);
                     }
                     else if (key == "infer.display.height")
                     {
-                        infer_cfg_.display_height = std::stoi(value);
+                        next_infer_cfg.display_height = parseStrictInt(value, key);
                     }
                     else if (key == "infer.display.fps")
                     {
-                        infer_cfg_.display_fps = std::stoi(value);
+                        next_infer_cfg.display_fps = parseStrictInt(value, key);
                     }
                     else if (key == "infer.output.mode")
                     {
-                        infer_cfg_.output_mode = shared::ToLower(shared::Trim(value));
-                        if (!isValidInferOutputMode(infer_cfg_.output_mode))
+                        next_infer_cfg.output_mode = shared::ToLower(shared::Trim(value));
+                        if (!isValidInferOutputMode(next_infer_cfg.output_mode))
                         {
                             throw std::runtime_error("infer.output.mode must be hdmi or png.");
                         }
-                        runtime_snapshot_.selection.output_mode = infer_cfg_.output_mode;
+                        next_selection.output_mode = next_infer_cfg.output_mode;
                     }
                     else if (key == "infer.output.dir")
                     {
-                        infer_cfg_.output_dir = value;
+                        next_infer_cfg.output_dir = value;
                     }
                     else if (key == "infer.output.overwrite")
                     {
-                        infer_cfg_.overwrite = shared::ParseBool(value, key);
+                        next_infer_cfg.overwrite = shared::ParseBool(value, key);
                     }
                     else if (key == "rd.execution_mode")
                     {
-                        rd_cfg_.execution_mode = shared::ToLower(shared::Trim(value));
-                        if (!isValidRdExecutionMode(rd_cfg_.execution_mode))
+                        next_rd_cfg.execution_mode = shared::ToLower(shared::Trim(value));
+                        if (!isValidRdExecutionMode(next_rd_cfg.execution_mode))
                         {
                             throw std::runtime_error("rd.execution_mode must be auto, memory_float32, or scratch_double.");
                         }
                     }
                     else if (key == "rd.echo_dir")
                     {
-                        rd_cfg_.echo_dir = value;
+                        next_rd_cfg.echo_dir = value;
                     }
                     else if (key == "rd.echo_ext")
                     {
-                        rd_cfg_.echo_ext = value;
+                        next_rd_cfg.echo_ext = value;
                     }
                     else if (key == "rd.output_dir")
                     {
-                        rd_cfg_.output_dir = value;
+                        next_rd_cfg.output_dir = value;
                     }
                     else if (key == "rd.scratch_dir")
                     {
-                        rd_cfg_.scratch_dir = value;
+                        next_rd_cfg.scratch_dir = value;
                     }
                     else if (key == "rd.column_tile")
                     {
-                        rd_cfg_.column_tile = std::stoi(value);
+                        next_rd_cfg.column_tile = parseStrictInt(value, key);
                     }
                     else if (key == "rd.row_tile")
                     {
-                        rd_cfg_.row_tile = std::stoi(value);
+                        next_rd_cfg.row_tile = parseStrictInt(value, key);
                     }
                     else if (key == "rd.memory_limit_mb")
                     {
-                        rd_cfg_.memory_limit_mb = std::stoi(value);
+                        next_rd_cfg.memory_limit_mb = parseStrictInt(value, key);
                     }
                     else if (key == "rd.prefer_memory_pipeline")
                     {
-                        rd_cfg_.prefer_memory_pipeline = shared::ParseBool(value, key);
+                        next_rd_cfg.prefer_memory_pipeline = shared::ParseBool(value, key);
                     }
                     else if (key == "rd.keep_scratch")
                     {
-                        rd_cfg_.keep_scratch = shared::ParseBool(value, key);
+                        next_rd_cfg.keep_scratch = shared::ParseBool(value, key);
                     }
                     else if (key == "rd.overwrite")
                     {
-                        rd_cfg_.overwrite = shared::ParseBool(value, key);
+                        next_rd_cfg.overwrite = shared::ParseBool(value, key);
                     }
                     else if (key == "flight.manual_step_px")
                     {
-                        flight_settings_.manual_step_px = std::stoi(value);
+                        next_flight_settings.manual_step_px = parseStrictInt(value, key);
                     }
                     else if (key == "flight.boost_step_px")
                     {
-                        flight_settings_.boost_step_px = std::stoi(value);
+                        next_flight_settings.boost_step_px = parseStrictInt(value, key);
                     }
                     else if (key == "flight.trigger_distance_px")
                     {
-                        flight_settings_.trigger_distance_px = std::stoi(value);
+                        next_flight_settings.trigger_distance_px = parseStrictInt(value, key);
                     }
                     else if (key == "flight.cache_grid_px")
                     {
-                        flight_settings_.cache_grid_px = std::stoi(value);
+                        next_flight_settings.cache_grid_px = parseStrictInt(value, key);
                     }
                     else if (key == "flight.path_overlay")
                     {
-                        flight_settings_.path_overlay = shared::ParseBool(value, key);
+                        next_flight_settings.path_overlay = shared::ParseBool(value, key);
                     }
                     else if (key == "flight.control_bindings")
                     {
-                        flight_settings_.control_bindings = value;
+                        next_flight_settings.control_bindings = value;
                     }
                 }
+
+                validateSettingsBudget(next_infer_cfg, next_rd_cfg);
+                validateFlightSettings(next_flight_settings);
+
+                infer_cfg_ = std::move(next_infer_cfg);
+                rd_cfg_ = std::move(next_rd_cfg);
+                flight_settings_ = std::move(next_flight_settings);
+                runtime_snapshot_.selection = std::move(next_selection);
+            }
+            catch (const SettingsValidationError &e)
+            {
+                return MakeErrorResponse(e.code, e.what());
             }
             catch (const std::exception &e)
             {
