@@ -1,36 +1,38 @@
-# ARCHITECTURE_TEMPLATE.md
+# ARCHITECTURE.md
 
-> 本文档记录当前仓库 `main/` 目录里真实存在的系统边界、模块边界、线程关系、配置边界和不可破坏约束。  
+> 本文档记录当前仓库 `main/` 目录的真实系统边界、模块关系、线程模型、配置边界和不可破坏约束。
 > 若历史描述与当前代码冲突，以当前代码实现为准。
 
 ---
 
 ## 1. 系统目标
 
-- 这是一个面向 `Linux + aarch64 + ZG330` 的 SAR 主机侧工作流工程。
-- 程序提供 3 个真实运行模式：
-  - `RD only`
-  - `Inference only`
-  - `Web Console`
+- 这是一个面向 `Linux + aarch64 + ZG330` 板端部署的 PSIN SAR 主机侧工作流程序。
+- 程序覆盖三类运行能力：
+  - `RD only`：把 `echo.bin` 成像为 SAR 灰度 PNG
+  - `Inference only`：把 SAR PNG 切成 patch，执行模型推理，输出 HDMI 或 PNG
+  - `Web Console`：通过嵌入式 HTTP + JSON + SSE 控制 RD / Infer 工作流
 - 典型数据链路为：
-  - `echo.bin -> RD 成像 -> SAR 灰度 PNG -> patch 推理 -> 灰度恢复图 + 分割图 -> HDMI / PNG`
-- `Web Console` 不是独立守护进程，而是主程序 `psin_workflow` 的第三种运行模式。
+  - `echo.bin -> RD 成像 -> SAR PNG -> patch 推理 -> 恢复图 / 分割图 / UI 合成 -> HDMI 或 PNG`
+- `Web Console` 不是独立守护进程，而是主程序 `psin_workflow` 的一个运行模式。
 
 顶层入口在 `main/src/main.cpp`：
 
 ```text
 main()
- -> PromptForMode()
- -> 1. RD only
- -> 2. Inference only
- -> 3. Web Console
- -> 0. Exit
+ -> while (true)
+    -> PromptForMode()
+    -> 1. RD only
+    -> 2. Inference only
+    -> 3. Web Console
+    -> 0. Exit
 ```
 
-当前实现补充说明：
+当前实现语义：
 
-- `main()` 不是外层菜单循环，而是一次性选择模式后直接 `return workflow::<mode>::Run(...)`
-- 因此 `workflow::web::Run(...)` 一旦返回，整个 `psin_workflow` 进程也会随之退出到 shell
+- `RD only` 和 `Inference only` 被选中后直接执行并返回进程退出码。
+- `Web Console` 返回 `0` 后不会直接退出进程，而是回到菜单循环，允许再次选择模式。
+- `Exit` 才是显式退出主程序的路径。
 
 ---
 
@@ -38,14 +40,14 @@ main()
 
 当前仓库明确不负责：
 
-- 模型训练、量化和导出
+- 模型训练、量化、导出
 - 重写 `deps/**` 或底层设备后端
-- 将 `RD only` 与 `Inference only` 自动串成一个单次大流水线
+- 把 `RD only` 与 `Inference only` 自动串成单次大流水线
 - 多作业并发推理
-- 独立外部 Web 服务进程、WebSocket、鉴权、TLS
-- 真实三维飞控建模
+- 独立外部 Web 服务、WebSocket、认证、TLS
+- 三维飞控或无人机控制系统
 
-`manual_flight` 当前已经实现为低自由度扫描游标模式，但它不是三维无人机飞控系统。
+`manual_flight` 当前只是 `manual_flight` patch 游标模式，不是物理飞控系统。
 
 ---
 
@@ -67,10 +69,15 @@ main()
   - `workflow::infer::Run(const std::filesystem::path&)`
   - `workflow::infer::Run(const AppConfig&, WorkflowRunControl*)`
 - 输入：
-  - `infer.input.sar_img_dir` 下的 SAR PNG
+  - `infer.input.sar_img_dir` 下的 SAR 图像
+- patch 模式：
+  - `auto_snake`
+  - `manual_flight`
+  - `debug_raster`
 - 输出：
   - `hdmi`
   - 或 `infer.output.dir/<sar_stem>/patch_*.png`
+  - `debug_raster` 下还会额外输出 `debug_<sar_stem>/restore` 和 `mask_class`
 
 ### 3.3 Web Console
 
@@ -79,12 +86,11 @@ main()
 - 协议：
   - `HTTP + JSON + SSE`
 - 职责：
-  - 读取和修改内存态选择项
-  - 读取和修改内存态设置项
-  - 启动、暂停、停止、复位后台 workflow
-  - 输出运行状态、事件流和图片预览
-  - 安全关闭 Web Console
-  - 退出时将 infer / rd / web 配置写回 YAML
+  - 读取和修改内存态 selection / settings
+  - 启动、暂停、停止、复位后台 RD / Infer workflow
+  - 暴露状态、事件流和图像预览
+  - 转发 `manual_flight` 键控输入
+  - 在退出前把 infer / rd / web 配置写回 runtime YAML
 
 ---
 
@@ -92,25 +98,29 @@ main()
 
 | 模块 | 文件 | 职责 |
 |---|---|---|
-| 主入口 | `main/src/main.cpp` | 菜单分发和模式选择 |
-| Shared config utils | `main/include/workflow/shared/config_utils.hpp` `main/src/config_utils.cpp` | 简化 YAML 读取、文本解析、原子写文件 |
-| Shared run control | `main/include/workflow/shared/run_control.hpp` | 协作式 `pause/resume/stop/reset` 和运行时快照发布 |
-| RD config | `main/include/workflow/rd/rd_config.hpp` `main/src/rd_config.cpp` | 读取/写回 `rd_imaging.yaml` |
-| RD workflow | `main/include/workflow/rd/rd_workflow.hpp` `main/src/rd_imaging_stream.cpp` | Echo 收集、shape 校验、执行模式选择、成像、写 PNG、清理 scratch |
-| Infer config | `main/include/workflow/infer/infer_config.hpp` `main/src/infer_config.cpp` | 读取/写回 `infer_workflow.yaml` |
-| Infer workflow | `main/include/workflow/infer/infer_workflow.hpp` `main/src/infer_workflow.cpp` | SAR 收集、patch 生成、tensor 构建、推理、后处理、UI 合成、HDMI/PNG 输出、manual_flight 运行时 |
-| Web config | `main/include/workflow/web/web_console_config.hpp` `main/src/web_console_config.cpp` `main/configs/web_console.yaml` | 读取/写回 Web 配置、`board_ip`、`flight.*` |
-| Web controller | `main/include/workflow/web/web_console_controller.hpp` `main/src/web_console_controller.cpp` | 选择项、设置项、状态机、后台 worker、manual key 转发、配置持久化入口 |
-| Web protocol | `main/include/workflow/web/web_console_protocol.hpp` `main/src/web_console_protocol.cpp` | JSON DTO、Query/Flat JSON 解析、状态响应序列化 |
-| Web server | `main/include/workflow/web/web_console_server.hpp` `main/src/web_console_server.cpp` `main/src/web_console_assets.cpp` | HTTP 路由、SSE、静态资源、预览图、`shutdown_web`、前端 UI |
-| HDMI display adapter | `main/include/infer_workflow_hdmi_display.hpp` | RGB565 HDMI 输出适配 |
+| 主入口 | `main/src/main.cpp` | 菜单循环与模式分发 |
+| Shared config utils | `main/include/workflow/shared/config_utils.hpp` `main/src/config_utils.cpp` | 简化 YAML 读写、文本解析、原子写文件 |
+| Shared run control | `main/include/workflow/shared/run_control.hpp` | 协作式 pause / resume / stop / reset 与状态快照发布 |
+| RD config | `main/include/workflow/rd/rd_config.hpp` `main/src/rd_config.cpp` | 读写 `rd_imaging.yaml` |
+| RD workflow | `main/include/workflow/rd/rd_workflow.hpp` `main/src/rd_imaging_stream.cpp` | Echo 扫描、管线选择、RD 成像、PNG 输出、scratch 生命周期 |
+| Infer config | `main/include/workflow/infer/infer_config.hpp` `main/src/infer_config.cpp` | 读写 `infer_workflow.yaml` |
+| Infer workflow orchestrator | `main/include/workflow/infer/infer_workflow.hpp` `main/src/infer_workflow.cpp` | 采集 SAR 图、打开设备、加载网络、创建 sink、驱动 patch 流程、发布快照 |
+| Infer manual runtime | `main/include/workflow/infer/manual_flight_runtime.hpp` `main/src/manual_flight_runtime.cpp` | `manual_flight` 游标状态机、方向切换、edge hold、latest-wins 调度 |
+| Infer patch planner | `main/include/workflow/infer/infer_workflow_internal.hpp` `main/src/infer/patch_planner.cpp` | `SnakePatchSource` 与 `DebugRasterPatchSource` |
+| Infer output / HDMI | `main/include/workflow/infer/infer_workflow_internal.hpp` `main/src/infer/output_sink.cpp` `main/include/infer_workflow_hdmi_display.hpp` | Tensor 构建、forward 封装、PNG/HDMI sink、快照邮箱、HDMI 渲染线程 |
+| Infer UI render | `main/include/workflow/infer/infer_workflow_internal.hpp` `main/src/infer/ui_render.cpp` | 小地图、manual telemetry 注入、工业 UI 合成 |
+| Web config | `main/include/workflow/web/web_console_config.hpp` `main/src/web_console_config.cpp` | 读写 `web_console.yaml` |
+| Web controller | `main/include/workflow/web/web_console_controller.hpp` `main/src/web_console_controller.cpp` | selection / settings、worker 生命周期、manual key 转发、状态机 |
+| Web protocol | `main/include/workflow/web/web_console_protocol.hpp` `main/src/web_console_protocol.cpp` | HTTP 请求解析、JSON DTO、状态序列化、路由枚举 |
+| Web server | `main/include/workflow/web/web_console_server.hpp` `main/src/web_console_server.cpp` `main/src/web_console_assets.cpp` | HTTP 路由、SSE、静态资源、预览接口、shutdown 路径 |
 
 模块边界约束：
 
-- `main.cpp` 只做模式分发，不进入 HTTP 或算法细节。
+- `main.cpp` 只做菜单与模式分发，不进入 HTTP 或算法细节。
+- `infer_workflow.cpp` 负责 Infer 总编排，但已不再独占所有 infer 细节实现。
+- `manual_flight` 核心状态机在 `manual_flight_runtime.cpp`，不是混在 Web 层。
+- `web_console_controller.cpp` 负责控制面状态与 worker 生命周期，不直接持有 socket 逻辑。
 - `web_console_server.cpp` 是唯一网络 I/O 承载点。
-- `web_console_controller.cpp` 负责 Web 控制平面的状态机和 worker 生命周期，不直接操作 socket。
-- RD 和 Infer 仍然各自保留单个顶层 `Run(...)` 入口。
 
 ---
 
@@ -122,14 +132,15 @@ main()
 rd_imaging.yaml
  -> LoadConfig
  -> collectEchoBins
- -> processOneEcho
-    -> readEchoShapeAndValidate
-    -> choose execution mode
-       -> memory_float32
-       -> scratch_double
-       -> auto(优先 memory_float32，不满足内存约束则回退 scratch_double)
-    -> writeNormalizedPng*
-    -> cleanup scratch
+ -> for each echo
+    -> processOneEcho
+       -> readEchoShapeAndValidate
+       -> choose execution mode
+          -> memory_float32
+          -> memory pipeline
+          -> scratch_double
+       -> write SAR PNG
+       -> cleanup scratch unless keep_scratch=true
 ```
 
 ### 5.2 Inference only
@@ -140,19 +151,21 @@ infer_workflow.yaml
  -> collectSarImages
  -> Device::Open
  -> loadNetwork / validateNetworkIO / initSession / session.apply
- -> create sink (PNG or HDMI)
+ -> create sink
+    -> PngFrameSink
+    -> or HdmiFrameSink + LatestSnapshotMailbox + HdmiRenderWorker
  -> for each SAR
     -> loadSarImageNorm
-    -> patch source
-       -> auto_snake: SnakePatchSource(cfg.patch_size, cfg.stride)
+    -> choose patch source
+       -> auto_snake: SnakePatchSource
        -> manual_flight: ManualFlightRuntime
+       -> debug_raster: DebugRasterPatchSource
     -> PatchTensorBuilder::build
     -> PatchInferenceRunner::forward
-    -> restoreToGrayU8
-    -> logitsToMaskBgr
-    -> buildMiniMapContext / applyManualTelemetry
+    -> restoreToGrayU8 / logitsToMaskBgr
+    -> applyManualTelemetry if needed
     -> composeIndustrialUiFrame
-    -> sink.write
+    -> sink.write or mailbox.publish
  -> Device::Close
 ```
 
@@ -168,12 +181,12 @@ browser
  -> GET /events
  -> WebConsoleServer
  -> WebConsoleController
- -> worker thread
+ -> background workflow worker
     -> workflow::rd::Run(AppConfig, WorkflowRunControl*)
     -> workflow::infer::Run(AppConfig, WorkflowRunControl*)
+ -> server stop + worker stop + config persist
  -> workflow::web::Run(...) returns
- -> main() returns
- -> process exits
+ -> main() menu loop resumes
 ```
 
 ---
@@ -195,11 +208,15 @@ browser
 - 内存上限
 - 执行模式
 
-当前支持的执行模式只有：
+当前支持执行模式：
 
 - `auto`
 - `memory_float32`
 - `scratch_double`
+
+说明：
+
+- `auto` 下代码会在 `memory_float32`、memory pipeline、`scratch_double` 之间按估算内存选择。
 
 ### 6.2 Infer config
 
@@ -209,18 +226,21 @@ browser
 
 职责：
 
-- 设备 URL
-- backend 相关开关
-- SAR 输入目录
+- 设备 URL 与 backend 选项
+- SAR 输入目录 / 扩展名 / 是否递归
 - patch 模式、`patch_size`、`stride`
-- 输出模式和输出目录
-- HDMI 显示尺寸
+- `debug_raster` 的 X/Y stride
+- 模型 `json/raw`
+- 输出模式与输出目录
+- HDMI 尺寸与 FPS
 
 当前代码约束：
 
 - `patch_size` 必须是 `512`
-- `stride` 不是写死常量，但必须为正整数
-- 当前仓库默认配置是 `stride: 128`
+- `stride` 必须为正整数，且不超过 `512`
+- 板级预算校验要求 `stride >= 64`
+- `debug_raster` 只能与 `output_mode=png` 组合
+- `manual_flight` 要求恰好选择一个 SAR 图像
 
 ### 6.3 Web config
 
@@ -240,12 +260,14 @@ browser
 - `flight.manual_step_px`
 - `flight.boost_step_px`
 - `flight.trigger_distance_px`
-  - 为兼容旧配置保留，但当前扫描游标模式不再依赖它触发 patch
 - `flight.cache_grid_px`
 - `flight.path_overlay`
 - `flight.control_bindings`
 
-当前实现中，Web config 已支持写回 YAML，不再是只读配置。
+说明：
+
+- Web config 支持写回 runtime YAML。
+- infer / rd config 也会在 Web Console 退出时一起持久化。
 
 ---
 
@@ -255,32 +277,26 @@ browser
 
 - Main thread
   - 运行 `main()`
-  - 在 Web Console 模式下创建 controller 和 server
-  - 负责整体启动/退出顺序与配置持久化
+  - 在 Web 模式下负责创建 controller / server
+  - 负责 Web 退出收尾与配置持久化
 - Web thread
   - 运行 `WebConsoleServer::Run()`
-  - 是唯一 HTTP/SSE 服务线程
+  - 单线程处理 HTTP 请求与 SSE 心跳/事件刷新
 - Workflow worker thread
   - 由 `WebConsoleController` 持有
-  - 真正执行 `workflow::rd::Run(...)` 或 `workflow::infer::Run(...)`
+  - 真实执行 `workflow::rd::Run(...)` 或 `workflow::infer::Run(...)`
 - HDMI render thread
-  - 仅存在于 `output.mode=hdmi`
-  - 负责从 `LatestSnapshotMailbox` 读取最新快照并显示
+  - 仅在 `infer.output.mode=hdmi` 时存在
+  - 从 `LatestSnapshotMailbox` 读取最新快照并刷新 HDMI
 - Manual cursor runtime
-  - 仅存在于 `patch.mode=manual_flight`
-  - 位于 infer worker 主循环内部
-  - 不再有独立 simulation thread
-  - 推进节拍绑定到“当前 patch 完成 -> 计算下一合法中心 -> 提交下一 patch”
+  - 没有独立线程
+  - `manual_flight` 推进节拍绑定在 infer worker patch 循环内
 
 关键约束：
 
-- Web 请求当前仍是单线程同步处理，没有每请求单独线程。
-- `GET /events` 是状态流主路径。
-- `GET /api/state` 用于首屏初始化、重连和 manual telemetry 读取。
-- `stop` 是协作式停止，真正停下仍依赖 workflow 到达安全点。
-- `manual_flight` 没有把控制逻辑塞进 HDMI 渲染线程，也没有把输入逻辑塞进 NPU forward 阻塞段。
-- 当前 manual 模式不再使用独立 simulation thread，推进节拍直接绑定到 patch 完成。
-- `ResetManualFlight()` 现在会把对外可见的 manual 中心点直接回到左上角第一个合法 patch 中心，而不是 `(0,0)` 占位值。
+- Web Server 不是 per-request 多线程模型。
+- `stop` 是协作式停止，依赖 RD / Infer 到达安全点。
+- `manual_flight` 输入不会直接插入 HDMI 渲染线程，也不会打断一次正在执行的 forward。
 
 ---
 
@@ -288,15 +304,16 @@ browser
 
 | 对象 | Owner | 生命周期 |
 |---|---|---|
-| `infer::AppConfig` / `rd::AppConfig` | 各自 `Run(...)` 栈对象，或 `WebConsoleController` 内存态副本 | 单次模式运行 / 单次 Web 生命周期 |
-| `WorkflowRunControl` | `WebConsoleController` | 单次后台作业生命周期 |
+| `infer::AppConfig` / `rd::AppConfig` | 各自 `Run(...)` 栈对象，或 `WebConsoleController` 内存态副本 | 单次运行 / 单次 Web 生命周期 |
+| `WorkflowRunControl` | `WebConsoleController` | 单次后台 workflow 生命周期 |
 | `WebConsoleController` | `workflow::web::Run(...)` | 整个 Web Console 生命周期 |
 | `WebConsoleServer` | `workflow::web::Run(...)` | 整个 HTTP/SSE 生命周期 |
-| `Device` / `Session` / `NetworkView` | `workflow::infer::Run(...)` | 整次推理运行 |
-| `IFrameSink` | `workflow::infer::Run(...)` | 整次推理运行 |
-| `RGB565HDMIDisplay` | `HdmiFrameSink` | HDMI 输出生命周期 |
-| `ManualFlightRuntime` | `workflow::infer::Run(...)` | 单张 manual_flight SAR 运行期间 |
-| RD scratch files | `workflow::rd::Run(...)` 每个 echo | 单 echo，除非 `keep_scratch=true` |
+| `Device` / `Session` / `NetworkView` | `workflow::infer::Run(...)` | 单次 infer 运行 |
+| `IFrameSink` | `workflow::infer::Run(...)` | 单次 infer 运行 |
+| `LatestSnapshotMailbox` | `workflow::infer::Run(...)` | 单次 HDMI infer 运行 |
+| `HdmiRenderWorker` | `workflow::infer::Run(...)` | 单次 HDMI infer 运行 |
+| `ManualFlightRuntimeState` | 当前活动的 `ManualFlightRuntime` + 进程级 coordinator 引用 | 单张 manual SAR 运行期内活跃 |
+| RD scratch files | `workflow::rd::Run(...)` 每个 echo | 单个 echo，除非 `keep_scratch=true` |
 
 Web Console 退出顺序以 `main/src/web_console.cpp` 为准：
 
@@ -315,7 +332,7 @@ PersistControllerConfigs(...)
 总体风格：
 
 - 顶层 `Run(...)` 返回整型状态码
-- 模块内部广泛使用异常
+- 模块内部大量使用异常
 - Web API 使用固定 JSON 结果：
   - `ok`
   - `code`
@@ -327,92 +344,66 @@ RD：
 
 Infer：
 
-- 关键初始化或设备错误会终止本次推理运行
-- 仍保留显式 `SIGSEGV -> _Exit(139)` 保护
+- 初始化、设备、模型或 session 错误会终止本次 infer 运行
+- 保留显式 `SIGSEGV -> _Exit(139)` 保护
 
 Web：
 
-- `manual_flight` 相关接口已经实现，不再返回历史上的 `not_implemented`
-- `shutdown_web` 会触发安全关闭路径
-- 按当前代码，`shutdown_web` 的结果不是“仅关闭 HTTP 服务后主程序继续驻留”，而是结束 `workflow::web::Run(...)`；由于 `main()` 是一次性模式分发，这会进一步导致整个进程退出
-- 后台异常通过 controller 收口为 `Error` 状态，并经 `SSE / /api/state / 事件流` 暴露
+- HTTP 请求解析区分 `400 / 408 / 413 / 500`
+- `shutdown_web` 触发安全停机路径
+- `shutdown_web` 当前会结束 `workflow::web::Run(...)`，但主程序随后回到菜单，而不是直接退出整个进程
 
 ---
 
 ## 10. 当前 UI / 控制事实
 
-Web 前端当前真实行为：
-
-- 设置面板默认隐藏，由齿轮按钮展开/收起
-- 右上角有黄色圆形 `Shutdown Web Console` 按钮
-- 历史上的 `manual_flight` 黄色常驻提示条已经删除
-- `patch_mode` 已包含 `manual_flight`
-- `Reserved Endpoints` 中的 `W/A/S/D` 和键盘输入会真正转发到 `/api/manual/key`
-- 前端不再维护旧的“按住/松开” manual key 集合；键盘输入只发送方向切换命令
-- 当前 manual telemetry 主要通过 `SSE` 状态事件暴露；`GET /api/state` 也可直接读取同一份 manual telemetry，但当前前端已不再对 manual 状态做低频轮询
+- 前端通过 `/events` 订阅状态流，`/api/state` 主要用于首屏初始化与补读状态。
+- `/api/source/preview` 只支持 inference 图像预览。
+- `patch_mode` 当前包含：
+  - `auto_snake`
+  - `manual_flight`
+  - `debug_raster`
+- `manual_flight` 的键控接口是 `/api/manual/key`。
+- `keyup` 在当前 cursor 语义下不会触发停止，只会被忽略。
+- Web 设置修改只更新内存态，真正落盘发生在 Web Console 退出时。
 
 ---
 
 ## 11. 不可破坏约束
 
-最重要的规则：
-
-- 主程序一次只运行一个模式
-- Web Console 下同一时刻只允许一个活跃后台 workflow
-- `WebConsoleServer` 是唯一网络 I/O 承载点
-- `WebConsoleController` 不应在持锁状态下做网络发送
-- RD 执行模式只允许 `auto / memory_float32 / scratch_double`
-- `patch_size` 必须保持 `512`
-- `manual_flight` 使用 latest-wins 的“方向变更”语义，不对历史方向做 FIFO 排队；位置推进仍然按 patch 一步一步走
-- `shutdown_web` 必须走安全关闭路径，不能直接粗暴 `std::exit(...)`
-- Web Console 退出前要写回当前 infer / rd / web 配置
+- 主程序一次只运行一个工作模式。
+- Web Console 下同一时刻只允许一个活动后台 workflow。
+- `WebConsoleServer` 是唯一网络 I/O 承载点。
+- `WebConsoleController` 不应在持锁状态下执行网络发送。
+- RD 执行模式外部接口只暴露 `auto / memory_float32 / scratch_double`。
+- `patch_size` 必须保持 `512`。
+- `manual_flight` 采用 latest-wins 的方向切换语义，不维护历史 FIFO 队列。
+- `shutdown_web` 必须走安全关闭路径，不能直接 `std::exit(...)`。
+- Web Console 退出前必须写回 infer / rd / web runtime 配置。
 
 ---
 
 ## 12. 高风险热点
 
 - `main/src/infer_workflow.cpp`
-  - 设备生命周期、推理顺序、manual runtime、HDMI 合成都集中在这里
+  - Infer 顶层编排、设备生命周期、patch 模式选择、快照发布
+- `main/src/manual_flight_runtime.cpp`
+  - manual cursor 状态机、边界处理、暂停/恢复、方向调度
+- `main/src/infer/output_sink.cpp`
+  - Tensor 构建、forward、PNG 输出、HDMI 快照和渲染线程交互
 - `main/src/rd_imaging_stream.cpp`
-  - RD 管线、scratch 生命周期、tile 安全点都在这里
+  - RD 管线选择、scratch 生命周期、安全点
 - `main/src/web_console_controller.cpp`
-  - Web 状态机、worker 生命周期、stop/reset/shutdown/manual key 都在这里
+  - Web 状态机、worker 生命周期、selection/settings 约束、manual key 转发
 - `main/src/web_console_server.cpp`
-  - HTTP 路由、SSE、socket 生命周期、shutdown 路径都在这里
-- `main/src/config_utils.cpp`
-  - 仍然是简化 YAML 读写，不是完整 round-trip 引擎
+  - HTTP 路由、SSE、shutdown 路径、socket 生命周期
 
 ---
 
 ## 13. 当前约束摘要
 
-- Web Console 不需要外网，只需要浏览器和板子网络可达
-- 浏览器实际访问地址应使用 `server.board_ip:server.port`
-- `server.bind` 只是监听地址
-- 当前仓库已经支持 infer / rd / web 配置写回 YAML
-- 文档、任务单与注释若和代码冲突，以当前代码为准
-
----
-
-## 14. Phase 4 Manual Flight
-
-- `manual_flight` 已接入真实执行链路，不再只是预留按钮或占位错误
-- 控制链路为：
-  - `browser keydown/keyup -> POST /api/manual/key -> WebConsoleController::commandManualKey(...) -> workflow::infer::SubmitManualFlightKey(...) -> infer 内部 ManualFlightRuntime`
-- `ManualFlightRuntime` 负责：
-  - 位置推进
-  - 速度推进
-  - 路径采样
-  - `requested_center` 更新
-  - `request_sequence / consumed_sequence` latest-wins 调度
-- infer worker 只消费最新 patch 请求，不保留历史队列
-- HDMI render thread 仍只负责显示，不负责飞行控制
-- `flight.*` 参数已经真正参与行为：
-  - `manual_step_px`
-  - `boost_step_px`
-  - `trigger_distance_px`
-    - 仅作为兼容配置项保留，不再驱动 manual patch 触发
-  - `cache_grid_px`
-  - `path_overlay`
-  - `control_bindings`
-- Web 前端会在 manual 运行态下补充轮询 `/api/state`，用于提升 telemetry 新鲜度
+- 实际代码已经支持 infer / rd / web 三份配置的 runtime 写回。
+- `main()` 当前是菜单循环；Web 退出后返回菜单，不是直接退出进程。
+- infer 已拆成 orchestrator、manual runtime、patch planner、UI render、output sink 多个实现文件。
+- `manual_flight` 已真实接入 infer 主链与 Web 控制链，但它是 patch 游标语义，不是实时飞控。
+- 文档、任务单或注释若与源码冲突，以当前源码为准。
