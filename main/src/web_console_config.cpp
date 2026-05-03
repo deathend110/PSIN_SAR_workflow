@@ -9,12 +9,14 @@ namespace workflow::web
 {
     namespace
     {
+        // 把布尔值写回 YAML 时统一转成 true/false 文本。
         const char *BoolText(bool value)
         {
             return value ? "true" : "false";
         }
     }
 
+    // 读取并校验 Web Console 配置。
     WebConsoleConfig LoadConfig(const std::filesystem::path &config_path)
     {
         const auto runtime_config_path = shared::EnsureRuntimeConfigFile(config_path);
@@ -58,6 +60,7 @@ namespace workflow::web
         return cfg;
     }
 
+    // 把 Web Console 配置写回 runtime YAML。
     void SaveConfig(const std::filesystem::path &config_path, const WebConsoleConfig &cfg)
     {
         const auto runtime_config_path = shared::RuntimeConfigPath(config_path);

@@ -45,26 +45,32 @@ namespace workflow::infer
 
     namespace
     {
+        // 这组常量把头文件里的固定模型约束带入实现文件，便于局部书写。
         constexpr int EXPECTED_N = kExpectedN;
         constexpr int EXPECTED_H = kExpectedH;
         constexpr int EXPECTED_W = kExpectedW;
         constexpr int EXPECTED_C = kExpectedC;
         constexpr int SEG_CLASSES = kSegClasses;
 
+        // 记录当前推理阶段，供日志和崩溃兜底输出使用。
         const char *g_runtime_stage = "startup";
 
+        // 更新“当前阶段”文本，并同步写入日志。
         void setStage(const char *stage)
         {
             g_runtime_stage = stage;
             spdlog::info("[stage] {}", stage);
         }
 
+        // 段错误兜底处理器：打印最近阶段后立刻退出，避免继续带着损坏状态运行。
         void handleSegfault(int)
         {
             std::fprintf(stderr, "\n[fatal] Segmentation fault near stage: %s\n", g_runtime_stage);
             std::_Exit(139);
         }
 
+        // 进程级 manual_flight 协调器。
+        // Web 控制面和当前活动 Infer runtime 通过它共享“最新配置”和“当前活动实例”。
         struct ManualFlightCoordinatorState
         {
             std::mutex mutex;
@@ -73,12 +79,14 @@ namespace workflow::infer
             std::shared_ptr<ManualFlightRuntimeState> runtime;
         };
 
+        // 返回全局唯一的 manual 协调器状态。
         ManualFlightCoordinatorState &manualFlightCoordinatorState()
         {
             static ManualFlightCoordinatorState state;
             return state;
         }
 
+        // 把进程级保存的 manual 配置同步给当前活动 runtime。
         void syncManualFlightRuntimeConfiguration(const std::shared_ptr<ManualFlightRuntimeState> &runtime)
         {
             if (runtime == nullptr)
@@ -98,6 +106,7 @@ namespace workflow::infer
             runtime->setConfiguration(settings, configured);
         }
 
+        // 注册当前活动 runtime，供外部键控输入查找。
         void registerManualFlightRuntimeState(const std::shared_ptr<ManualFlightRuntimeState> &runtime)
         {
             auto &coordinator = manualFlightCoordinatorState();
@@ -105,6 +114,7 @@ namespace workflow::infer
             coordinator.runtime = runtime;
         }
 
+        // 在 runtime 生命周期结束时注销它，避免保留悬空引用。
         void unregisterManualFlightRuntimeState(const std::shared_ptr<ManualFlightRuntimeState> &runtime)
         {
             auto &coordinator = manualFlightCoordinatorState();
@@ -115,6 +125,7 @@ namespace workflow::infer
             }
         }
 
+        // 把配置字符串解析成内部 patch 模式枚举。
         shared::SelectedPatchMode parsePatchMode(const std::string &mode)
         {
             const std::string lowered = shared::ToLower(mode);
@@ -129,6 +140,7 @@ namespace workflow::infer
             return shared::SelectedPatchMode::AutoSnake;
         }
 
+        // 基于 Infer 配置生成一份给 Web 快照层使用的 selection。
         shared::WorkflowSelection makeSelection(const AppConfig &cfg)
         {
             shared::WorkflowSelection selection;
@@ -139,6 +151,7 @@ namespace workflow::infer
             return selection;
         }
 
+        // 若 control 存在，则向上层发布一份运行态快照。
         void publishSnapshot(shared::WorkflowRunControl *control,
                              const AppConfig &cfg,
                              const RuntimeState &state,
@@ -167,6 +180,7 @@ namespace workflow::infer
         }
     }
 
+    // 返回当前活动的 manual runtime；Web manual 输入会通过它转发到真实状态机。
     std::shared_ptr<ManualFlightRuntimeState> activeManualFlightRuntimeState()
     {
         auto &coordinator = manualFlightCoordinatorState();
@@ -174,6 +188,7 @@ namespace workflow::infer
         return coordinator.runtime;
     }
 
+    // 更新进程级 manual 参数，并在有活动 runtime 时立刻同步。
     void ConfigureManualFlight(const ManualFlightSettings &settings)
     {
         std::shared_ptr<ManualFlightRuntimeState> runtime;
@@ -190,6 +205,7 @@ namespace workflow::infer
         }
     }
 
+    // 请求当前活动 manual runtime 复位。
     void ResetManualFlight()
     {
         const auto runtime = activeManualFlightRuntimeState();
@@ -200,6 +216,7 @@ namespace workflow::infer
         runtime->reset();
     }
 
+    // 设置当前活动 manual runtime 的暂停态。
     void SetManualFlightPaused(bool paused)
     {
         const auto runtime = activeManualFlightRuntimeState();
@@ -210,6 +227,7 @@ namespace workflow::infer
         runtime->setPaused(paused);
     }
 
+    // 把来自 Web/UI 的方向键输入转发给当前活动 runtime。
     bool SubmitManualFlightKey(const std::string &key, bool pressed, std::string *message)
     {
         const auto runtime = activeManualFlightRuntimeState();
@@ -224,6 +242,8 @@ namespace workflow::infer
         return runtime->submitDirectionKey(key, pressed, message);
     }
 
+    // 读取当前 manual 遥测。
+    // 如果当前没有活动 runtime，则构造一份基于最近配置的“空闲态遥测”返回。
     ManualFlightTelemetry GetManualFlightTelemetry()
     {
         const auto runtime = activeManualFlightRuntimeState();
@@ -240,6 +260,7 @@ namespace workflow::infer
 
     namespace
     {
+        // 把 shape 向量格式化成 `[a,b,c]`，便于报错打印。
         template <typename ShapeType>
         std::string shapeToString(const ShapeType &shape)
         {
@@ -257,6 +278,7 @@ namespace workflow::infer
             return oss.str();
         }
 
+    // 扫描配置中的 SAR 输入路径，统一返回待处理图像列表。
     std::vector<fs::path> collectSarImages(const AppConfig &cfg)
     {
         if (!fs::exists(cfg.sar_img_dir))
@@ -305,6 +327,7 @@ namespace workflow::infer
         return files;
     }
 
+    // 读取单张 SAR 灰度图，并归一化到 `CV_32FC1, 0~1`。
     cv::Mat loadSarImageNorm(const fs::path &path)
     {
         cv::Mat gray = cv::imread(path.string(), cv::IMREAD_GRAYSCALE);
@@ -317,9 +340,12 @@ namespace workflow::infer
         return norm;
     }
 
+    // `manual_flight` 模式的 patch 适配器。
+    // 它把“中心点驱动”的 runtime 状态机包装成 Infer 主循环可消费的 `PatchPacket` 流。
     class ManualFlightRuntime
     {
     public:
+        // 保存整图与 patch 约束，并激活底层 manual runtime。
         ManualFlightRuntime(cv::Mat image_norm, int patch_size, int stride)
             : image_norm_(std::move(image_norm)),
               patch_size_(patch_size),
@@ -336,6 +362,7 @@ namespace workflow::infer
             syncManualFlightRuntimeConfiguration(state_);
         }
 
+        // 析构时停止 runtime 并从全局协调器里注销自己。
         ~ManualFlightRuntime()
         {
             requestStop();
@@ -343,6 +370,7 @@ namespace workflow::infer
             unregisterManualFlightRuntimeState(state_);
         }
 
+        // 等待下一个 manual patch 请求，并把中心点切成完整的 patch 包。
         bool waitNextPatch(PatchPacket &packet, shared::WorkflowRunControl *control, int patch_index)
         {
             cv::Point center;
@@ -357,12 +385,14 @@ namespace workflow::infer
             return true;
         }
 
+        // 告知底层状态机：当前 patch 已经真正完成推理。
         void markInferenceCommitted(const PatchPacket &packet)
         {
             const cv::Point center(packet.info.x + packet.info.width / 2, packet.info.y + packet.info.height / 2);
             state_->markInferenceCommitted(center);
         }
 
+        // 请求停止当前 manual runtime。
         void requestStop()
         {
             stop_requested_ = true;
@@ -373,6 +403,7 @@ namespace workflow::infer
         }
 
     private:
+        // 根据中心点截取图像块，并填充 patch 元数据。
         PatchPacket makePacket(const cv::Point &center, int patch_index) const
         {
             const int half = patch_size_ / 2;
@@ -396,6 +427,7 @@ namespace workflow::infer
         std::shared_ptr<ManualFlightRuntimeState> state_;
     };
 
+    // 从 JSON + raw 模型文件创建网络对象。
     Network loadNetwork(const std::string &json_path, const std::string &raw_path)
     {
         Network network = Network::CreateFromJsonFile(json_path);
@@ -403,6 +435,7 @@ namespace workflow::infer
         return network;
     }
 
+    // 根据配置创建 session，并应用 zg330 特有的后端优化选项。
     Session initSession(const AppConfig &cfg, const NetworkView &network_view, Device &device)
     {
         if (cfg.run_backend == "host")
@@ -450,6 +483,7 @@ namespace workflow::infer
         return session;
     }
 
+    // 校验模型输入输出是否符合当前后处理逻辑的固定假设。
     void validateNetworkIO(const NetworkView &network_view)
     {
         if (network_view.inputs().size() != 1)
@@ -480,6 +514,7 @@ namespace workflow::infer
         }
     }
 
+    // 生成显示在 UI 顶部的输出目标标签。
     std::string buildOutputLabel(const AppConfig &cfg)
     {
         if (cfg.output_mode == "hdmi")
@@ -489,6 +524,8 @@ namespace workflow::infer
         }
         return "PNG / " + cfg.output_dir.string();
     }
+
+    // 按配置输出 ZG330 backend 日志，便于排查部署与编译问题。
     void emitBackendLogIfRequested(const AppConfig &cfg, Session &session)
     {
         if (!cfg.dump_backend_log || cfg.run_backend != "zg330")
@@ -506,11 +543,14 @@ namespace workflow::infer
     }
     }
 
+// 入口重载：先从配置文件加载配置，再复用真正的执行函数。
 int Run(const std::filesystem::path &config_path)
 {
     return Run(LoadConfig(config_path), nullptr);
 }
 
+// Infer 顶层执行函数。
+// 它负责设备 / 网络生命周期、patch 源选择、输出目标选择以及运行态快照发布。
 int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
 {
     Device device;

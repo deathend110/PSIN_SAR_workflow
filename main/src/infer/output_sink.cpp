@@ -37,6 +37,7 @@ namespace workflow::infer
 
     namespace
     {
+        // 把 shape 向量格式化成带逗号分隔的文本，供报错打印。
         template <typename ShapeT>
         std::string shapeToString(const ShapeT &shape)
         {
@@ -54,6 +55,7 @@ namespace workflow::infer
             return oss.str();
         }
 
+        // 把一块 host 浮点数据封装成与模型输入定义一致的 Tensor。
         Tensor dataToFp32Tensor(const float *input_data, const Value &input_value)
         {
             TensorType out_dtype;
@@ -73,6 +75,7 @@ namespace workflow::infer
         }
     }
 
+    // 根据模型输入定义校验 shape / dtype，并缓存输入描述。
     PatchTensorBuilder::PatchTensorBuilder(const NetworkView &network_view)
         : input_value_(network_view.inputs()[0])
     {
@@ -90,6 +93,7 @@ namespace workflow::infer
         }
     }
 
+    // 把 `CV_32FC1 512x512` patch 转成一份可直接 forward 的 FP32 tensor。
     Tensor PatchTensorBuilder::build(const cv::Mat &patch_norm) const
     {
         if (patch_norm.empty() || patch_norm.type() != CV_32FC1 || patch_norm.rows != kExpectedH || patch_norm.cols != kExpectedW)
@@ -100,11 +104,13 @@ namespace workflow::infer
         return dataToFp32Tensor(reinterpret_cast<const float *>(continuous.data), input_value_);
     }
 
+    // 保存 session、device 和输出等待超时。
     PatchInferenceRunner::PatchInferenceRunner(Session &session, Device &device, int output_wait_ms)
         : session_(session), device_(device), output_wait_ms_(output_wait_ms)
     {
     }
 
+    // 执行一次 forward，把所有输出等到 ready 后统一拷回 host。
     std::vector<Tensor> PatchInferenceRunner::forward(const Tensor &input_tensor)
     {
         auto outputs = session_.forward({input_tensor});
@@ -119,6 +125,7 @@ namespace workflow::infer
         return host_outputs;
     }
 
+    // 把 restore 输出张量量化成 8 位灰度图。
     cv::Mat restoreToGrayU8(const Tensor &tensor)
     {
         const auto *data = reinterpret_cast<const float *>(tensor.data().cptr());
@@ -135,6 +142,7 @@ namespace workflow::infer
         return gray;
     }
 
+    // 对每个像素取 argmax，把 6 类 logits 渲染成彩色 mask。
     cv::Mat logitsToMaskBgr(const Tensor &tensor)
     {
         const auto *data = reinterpret_cast<const float *>(tensor.data().cptr());
@@ -162,6 +170,7 @@ namespace workflow::infer
         return mask_bgr;
     }
 
+    // 把每个像素的 argmax 类别写成单通道类别图，供 debug_raster 落盘分析。
     cv::Mat logitsToMaskClassU8(const Tensor &tensor)
     {
         const auto *data = reinterpret_cast<const float *>(tensor.data().cptr());
@@ -189,12 +198,14 @@ namespace workflow::infer
         return mask_class;
     }
 
+    // 初始化 PNG 输出根目录。
     PngFrameSink::PngFrameSink(std::filesystem::path output_dir, bool overwrite)
         : output_dir_(std::move(output_dir)), overwrite_(overwrite)
     {
         fs::create_directories(output_dir_);
     }
 
+    // 把最终 UI 帧写到 `<output_dir>/<sar_stem>/patch_xxxxxx.png`。
     void PngFrameSink::write(const RuntimeState &state, const cv::Mat &frame_bgr)
     {
         const auto sar_dir = output_dir_ / state.sar_stem;
@@ -212,6 +223,7 @@ namespace workflow::infer
         }
     }
 
+    // 在 debug_raster 模式下额外保存恢复图和类别图。
     void PngFrameSink::writeDebugPatchOutputs(const RuntimeState &state,
                                               const cv::Mat &restore_gray,
                                               const cv::Mat &mask_class)
@@ -241,14 +253,17 @@ namespace workflow::infer
         }
     }
 
+    // 创建底层 RGB565 HDMI 显示适配器。
     HdmiFrameSink::HdmiFrameSink(FPAIDevice &device, int width, int height, int fps)
         : display_(std::make_unique<infer_workflow::RGB565HDMIDisplay<FPAIDevice>>(0, device, width, height)),
           fps_(fps)
     {
     }
 
+    // 默认析构即可。
     HdmiFrameSink::~HdmiFrameSink() = default;
 
+    // 把 BGR 帧转成 RGB565 后交给底层 HDMI 适配器显示。
     void HdmiFrameSink::write(const RuntimeState &, const cv::Mat &frame_bgr)
     {
         cv::Mat rgb565;
@@ -256,6 +271,7 @@ namespace workflow::infer
         display_->show(reinterpret_cast<int8_t *>(rgb565.data));
     }
 
+    // 覆盖式发布一份最新推理快照。
     void LatestSnapshotMailbox::publish(InferenceSnapshot &&snapshot)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -264,6 +280,7 @@ namespace workflow::infer
         cv_.notify_all();
     }
 
+    // 读取当前最新快照及其发布序号。
     bool LatestSnapshotMailbox::loadLatest(InferenceSnapshot &snapshot, std::uint64_t &sequence)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -276,6 +293,7 @@ namespace workflow::infer
         return true;
     }
 
+    // 等待“新快照 / 输入关闭 / stop 请求”中的任一事件。
     LatestSnapshotMailbox::WakeReason LatestSnapshotMailbox::waitForChangeOrStop(std::uint64_t known_sequence,
                                                                                  std::chrono::microseconds timeout)
     {
@@ -297,6 +315,7 @@ namespace workflow::infer
         return WakeReason::InputClosed;
     }
 
+    // 标记输入结束，让渲染线程输出停止帧后退出。
     void LatestSnapshotMailbox::markInputClosed()
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -304,6 +323,7 @@ namespace workflow::infer
         cv_.notify_all();
     }
 
+    // 请求渲染线程尽快停止。
     void LatestSnapshotMailbox::requestStop()
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -311,6 +331,7 @@ namespace workflow::infer
         cv_.notify_all();
     }
 
+    // 保存 sink、邮箱和显示参数；真正的线程在 start() 之后启动。
     HdmiRenderWorker::HdmiRenderWorker(IFrameSink &sink,
                                        LatestSnapshotMailbox &mailbox,
                                        const UiRenderContext &placeholder_ui_context,
@@ -329,16 +350,19 @@ namespace workflow::infer
     {
     }
 
+    // 启动 HDMI 渲染线程。
     void HdmiRenderWorker::start()
     {
         worker_ = std::thread(&HdmiRenderWorker::run, this);
     }
 
+    // 请求渲染线程停止。
     void HdmiRenderWorker::requestStop()
     {
         mailbox_.requestStop();
     }
 
+    // 等待线程退出，并在必要时重抛线程内部异常。
     void HdmiRenderWorker::join()
     {
         if (worker_.joinable())
@@ -348,6 +372,7 @@ namespace workflow::infer
         rethrowIfFailed();
     }
 
+    // 如果渲染线程失败，则把异常重新抛回调用线程。
     void HdmiRenderWorker::rethrowIfFailed()
     {
         std::lock_guard<std::mutex> lock(error_mutex_);
@@ -357,6 +382,8 @@ namespace workflow::infer
         }
     }
 
+    // 渲染线程主循环。
+    // 它会持续刷新当前帧，并在 stop / input_closed 时输出一帧 STOPPED 画面再退出。
     void HdmiRenderWorker::run()
     {
         try
@@ -471,12 +498,15 @@ namespace workflow::infer
         }
     }
 
+    // 在设备互斥保护下写出一帧，避免与 NPU/device 访问并发冲突。
     void HdmiRenderWorker::writeFrame(const RuntimeState &state, const cv::Mat &frame_bgr)
     {
         std::lock_guard<std::mutex> device_lock(device_access_mutex_);
         sink_.write(state, frame_bgr);
     }
 
+    // PNG 路径下处理一个 patch：
+    // forward -> 后处理 -> UI 合成 -> 落盘，并返回更新后的 RuntimeState。
     RuntimeState processPatchToPng(const PatchPacket &packet,
                                    const RuntimeState &base_state,
                                    const UiRenderContext &ui_context,
@@ -540,6 +570,8 @@ namespace workflow::infer
         return state;
     }
 
+    // HDMI 路径下处理一个 patch：
+    // forward -> 后处理 -> 发布最新快照，由渲染线程异步刷新显示。
     RuntimeState processPatchToHdmi(const PatchPacket &packet,
                                     const RuntimeState &base_state,
                                     const UiRenderContext &ui_context,

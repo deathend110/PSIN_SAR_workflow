@@ -9,10 +9,12 @@
 
 namespace
 {
+    // 三种运行模式默认使用的配置文件路径。
     constexpr const char *kRdConfigPath = "configs/rd_imaging.yaml";
     constexpr const char *kInferConfigPath = "configs/infer_workflow.yaml";
     constexpr const char *kWebConfigPath = "configs/web_console.yaml";
 
+    // 在终端里循环显示菜单，直到用户输入一个合法模式编号。
     workflow::AppMode PromptForMode()
     {
         while (true)
@@ -53,6 +55,10 @@ namespace
     }
 }
 
+// 主程序入口。
+// 当前语义是：
+// 1. RD / Infer 选择后执行完即退出进程。
+// 2. Web Console 正常返回后会重新回到菜单。
 int main()
 {
     while (true)

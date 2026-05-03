@@ -9,12 +9,14 @@ namespace workflow::rd
 {
     namespace
     {
+        // 把布尔值写回 YAML 时统一转成 true/false 文本。
         const char *BoolText(bool value)
         {
             return value ? "true" : "false";
         }
     }
 
+    // 读取并校验 RD 配置。
     AppConfig LoadConfig(const std::filesystem::path &config_path)
     {
         const auto runtime_config_path = shared::EnsureRuntimeConfigFile(config_path);
@@ -57,6 +59,7 @@ namespace workflow::rd
         return cfg;
     }
 
+    // 把当前 RD 配置写回 runtime YAML。
     void SaveConfig(const std::filesystem::path &config_path, const AppConfig &cfg)
     {
         const auto runtime_config_path = shared::RuntimeConfigPath(config_path);

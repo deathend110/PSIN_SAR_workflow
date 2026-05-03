@@ -28,6 +28,7 @@ namespace workflow::web
 {
     namespace
     {
+        // 选择 socket 发送标志；在支持的平台上避免对端断开时触发 SIGPIPE。
         int socketSendFlags()
         {
             int flags = 0;
@@ -37,6 +38,7 @@ namespace workflow::web
             return flags;
         }
 
+        // 尽力把缓冲区全部写入 socket；中途中断会重试，其它错误返回 false。
         bool sendAll(int fd, const void *data, size_t size)
         {
             const char *cursor = static_cast<const char *>(data);
@@ -62,11 +64,13 @@ namespace workflow::web
             return true;
         }
 
+        // 发送整段字符串数据。
         bool sendString(int fd, const std::string &data)
         {
             return sendAll(fd, data.data(), data.size());
         }
 
+        // 按当前轻量 HTTP server 的需要拼出一个完整响应报文。
         std::string makeHttpResponse(const std::string &status,
                                      const std::string &content_type,
                                      const std::string &body,
@@ -85,6 +89,7 @@ namespace workflow::web
             return oss.str();
         }
 
+        // 以二进制方式读入一个完整文件，主要供图片预览接口使用。
         std::string readFileBinary(const std::filesystem::path &path)
         {
             std::ifstream ifs(path, std::ios::binary);
@@ -97,6 +102,7 @@ namespace workflow::web
             return oss.str();
         }
 
+        // 根据文件后缀推断预览接口返回的 Content-Type。
         std::string contentTypeForPath(const std::filesystem::path &path)
         {
             const std::string ext = workflow::shared::ToLower(path.extension().string());
@@ -115,6 +121,7 @@ namespace workflow::web
             return "application/octet-stream";
         }
 
+        // 一次路由分发后的结果：普通响应、SSE 升级，或附带 server stop 请求。
         struct RouteOutcome
         {
             std::string response;
@@ -122,6 +129,7 @@ namespace workflow::web
             bool request_stop = false;
         };
 
+        // 把 HTTP 请求分发到对应控制器动作，并生成统一的 RouteOutcome。
         RouteOutcome dispatchRoute(const detail::HttpRequest &request,
                                    const std::unordered_map<std::string, std::string> &query,
                                    WebConsoleController &controller,
@@ -256,9 +264,12 @@ namespace workflow::web
         }
     }
 
+    // SSE 广播中心。
+    // 它负责保存长连接客户端、缓存待发送事件，并在 Web 主循环里按批次刷出。
     class SseHub
     {
     public:
+        // 接受一个新的 SSE 客户端，并先推送一帧初始 state。
         bool acceptClient(int client_fd, const std::string &initial_state_payload)
         {
             auto client = std::make_shared<Client>(client_fd);
@@ -286,6 +297,7 @@ namespace workflow::web
             return true;
         }
 
+        // 关闭并清空全部 SSE 客户端，同时丢弃待发送事件。
         void stopAll()
         {
             std::lock_guard<std::mutex> clients_lock(clients_mutex_);
@@ -309,12 +321,14 @@ namespace workflow::web
             pending_events_.clear();
         }
 
+        // 把一条事件暂存到待发送队列。
         void queueEvent(const std::string &event_name, const std::string &payload)
         {
             std::lock_guard<std::mutex> lock(events_mutex_);
             pending_events_.push_back(QueuedEvent{event_name, payload});
         }
 
+        // 批量把积压事件广播给所有仍然存活的 SSE 客户端。
         void flushQueuedEvents()
         {
             std::vector<QueuedEvent> events;
@@ -341,6 +355,7 @@ namespace workflow::web
             }
         }
 
+        // 给所有 SSE 客户端发送心跳帧，避免空闲长连接被中间层回收。
         void sendHeartbeatFrames()
         {
             pruneDeadClients();
@@ -354,6 +369,7 @@ namespace workflow::web
     private:
         struct Client
         {
+            // 记录一个 SSE 客户端连接及其写锁。
             explicit Client(int client_fd)
                 : fd(client_fd)
             {
@@ -364,18 +380,21 @@ namespace workflow::web
             std::atomic<bool> active{true};
         };
 
+        // 一条尚未广播的 SSE 事件。
         struct QueuedEvent
         {
             std::string name;
             std::string payload;
         };
 
+        // 返回当前客户端列表快照，避免长时间占用 clients 锁。
         std::vector<std::shared_ptr<Client>> snapshotClients()
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
             return clients_;
         }
 
+        // 在单个客户端的写锁保护下发送一帧 SSE 数据。
         bool sendFrame(const std::shared_ptr<Client> &client, const std::string &payload)
         {
             if (!client || !client->active)
@@ -391,6 +410,7 @@ namespace workflow::web
             return true;
         }
 
+        // 清理已经失活的 SSE 客户端连接。
         void pruneDeadClients()
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
@@ -419,6 +439,7 @@ namespace workflow::web
         std::vector<QueuedEvent> pending_events_;
     };
 
+    // 保存配置和控制器引用，并把控制器事件接到 SSE 队列。
     WebConsoleServer::WebConsoleServer(const WebConsoleConfig &config, WebConsoleController &controller)
         : config_(config), controller_(controller), sse_hub_(std::make_unique<SseHub>())
     {
@@ -427,12 +448,14 @@ namespace workflow::web
         });
     }
 
+    // 析构时断开事件回调并停止所有网络资源。
     WebConsoleServer::~WebConsoleServer()
     {
         controller_.setEventCallback(WebConsoleController::EventCallback{});
         Stop();
     }
 
+    // 启动监听 socket，并进入 accept loop。
     void WebConsoleServer::Run()
     {
         stop_requested_ = false;
@@ -474,6 +497,7 @@ namespace workflow::web
         acceptLoop(listen_fd_);
     }
 
+    // 停止 server：关闭监听 socket，并清空所有 SSE 客户端。
     void WebConsoleServer::Stop()
     {
         stop_requested_ = true;
@@ -490,6 +514,8 @@ namespace workflow::web
         }
     }
 
+    // Web 主循环。
+    // 它在单线程里交替处理：事件刷新、SSE 心跳、select 等待、accept 客户端。
     void WebConsoleServer::acceptLoop(int listen_fd)
     {
         auto next_heartbeat = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.sse_heartbeat_ms);
@@ -550,6 +576,7 @@ namespace workflow::web
         flushQueuedEvents();
     }
 
+    // 处理单个 HTTP 客户端连接；普通请求直接返回响应，SSE 请求则转成长连接。
     void WebConsoleServer::handleClient(int client_fd)
     {
         bool keep_open = false;
@@ -591,6 +618,7 @@ namespace workflow::web
         }
     }
 
+    // 把当前连接升级成 SSE 客户端，并立刻推送一帧初始状态。
     bool WebConsoleServer::handleSseClient(int client_fd)
     {
         if (!sse_hub_)
@@ -601,6 +629,7 @@ namespace workflow::web
                                       MakeStateResponse(controller_.snapshot(), controller_.manualTelemetry()));
     }
 
+    // 向 SSE 中心暂存一条事件。
     void WebConsoleServer::queueEvent(const std::string &event_name, const std::string &payload)
     {
         if (sse_hub_)
@@ -609,6 +638,7 @@ namespace workflow::web
         }
     }
 
+    // 触发 SSE 中心批量广播积压事件。
     void WebConsoleServer::flushQueuedEvents()
     {
         if (sse_hub_)
@@ -617,6 +647,7 @@ namespace workflow::web
         }
     }
 
+    // 触发 SSE 中心发送心跳帧。
     void WebConsoleServer::sendHeartbeatFrames()
     {
         if (sse_hub_)

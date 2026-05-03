@@ -17,6 +17,8 @@ namespace workflow::web
 
     namespace
     {
+        // 用于区分“字段格式错误”和“板端资源预算超限”两类设置校验失败，
+        // 这样 HTTP 层可以把不同错误编码返回给前端。
         struct SettingsValidationError : std::runtime_error
         {
             SettingsValidationError(std::string code, std::string message)
@@ -27,11 +29,13 @@ namespace workflow::web
             std::string code;
         };
 
+        // 统一抛出普通字段校验错误，避免各处分散拼接错误码。
         [[noreturn]] void throwInvalidSettings(const std::string &message)
         {
             throw SettingsValidationError("invalid_settings", message);
         }
 
+        // 统一抛出板端预算超限错误，前端可据此提示“配置合法但设备跑不动”。
         [[noreturn]] void throwBoardBudgetExceeded(const std::string &message)
         {
             throw SettingsValidationError("board_budget_exceeded", message);
@@ -46,6 +50,7 @@ namespace workflow::web
         constexpr int kHighFpsThreshold = 30;
         constexpr int kMaxBoardMemoryLimitMb = 512;
 
+        // 将字符串严格解析成整数；若存在空串、尾随字符或格式问题，一律视为非法输入。
         int parseStrictInt(const std::string &value, const std::string &field)
         {
             const std::string trimmed = shared::Trim(value);
@@ -69,16 +74,19 @@ namespace workflow::web
             }
         }
 
+        // Web Console 目前只支持 HDMI 实时显示和 PNG 落盘两种输出模式。
         bool isValidInferOutputMode(const std::string &value)
         {
             return value == "hdmi" || value == "png";
         }
 
+        // debug_raster 是调试路径，语义上等价于“离线规则切图”，不走实时 HDMI 输出。
         bool isDebugRasterMode(shared::SelectedPatchMode patch_mode)
         {
             return patch_mode == shared::SelectedPatchMode::DebugRaster;
         }
 
+        // 检查 workflow / patch / output 三元组选项是否自洽，返回空串表示合法。
         std::string validateInferSelection(shared::SelectedPatchMode patch_mode, const std::string &output_mode)
         {
             if (isDebugRasterMode(patch_mode) && output_mode != "png")
@@ -88,6 +96,7 @@ namespace workflow::web
             return {};
         }
 
+        // RD 当前允许三种执行模式：自动选择、强制 float32 内存管线、强制 double scratch 管线。
         bool isValidRdExecutionMode(const std::string &value)
         {
             return value == "auto" ||
@@ -95,6 +104,8 @@ namespace workflow::web
                    value == "scratch_double";
         }
 
+        // 这里不是做“语法解析”，而是做“板端能否承受”的预算校验。
+        // 约束集中放在这里，避免前端和后端各自维护一套规则。
         void validateSettingsBudget(const infer::AppConfig &infer_cfg, const rd::AppConfig &rd_cfg)
         {
             if (infer_cfg.patch_size != infer::kExpectedH || infer_cfg.patch_size != infer::kExpectedW)
@@ -157,6 +168,7 @@ namespace workflow::web
             }
         }
 
+        // 飞行参数虽然很多在当前 cursor 模式下未全部生效，但仍保持基本正值约束。
         void validateFlightSettings(const FlightSettings &flight_settings)
         {
             if (flight_settings.manual_step_px <= 0 ||
@@ -168,12 +180,14 @@ namespace workflow::web
             }
         }
 
+        // 仅推理输入支持预览，因此这里识别常见图片格式供 /api/source/preview 使用。
         bool isImageFile(const fs::path &path)
         {
             const auto ext = shared::ToLower(path.extension().string());
             return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp";
         }
 
+        // 用于确认用户在前端选中的 source id 仍然存在，避免目录刷新后落到悬空引用。
         bool hasSourceId(const std::vector<SourceInfo> &sources, const std::string &id)
         {
             return std::any_of(sources.begin(), sources.end(), [&](const SourceInfo &info) {
@@ -181,6 +195,8 @@ namespace workflow::web
             });
         }
 
+        // 扫描工作流输入源并转成统一的前端展示结构。
+        // Infer 侧可能递归扫描图片目录，RD 侧则通常只平铺扫描 echo bin。
         std::vector<SourceInfo> scanSources(const fs::path &root,
                                             const std::string &ext_filter,
                                             bool recursive,
@@ -243,6 +259,10 @@ namespace workflow::web
         }
     }
 
+    // 控制器保存三类职责：
+    // 1. 运行时配置与前端选择状态；
+    // 2. 工作线程和停止/暂停控制句柄；
+    // 3. SSE 事件分发所需的状态快照。
     WebConsoleController::WebConsoleController(infer::AppConfig infer_cfg, rd::AppConfig rd_cfg)
         : infer_cfg_(std::move(infer_cfg)), rd_cfg_(std::move(rd_cfg))
     {
@@ -264,6 +284,7 @@ namespace workflow::web
         last_applied_.selection = runtime_snapshot_.selection;
     }
 
+    // 析构时只做“协作式停机 + join”，不主动杀线程，保证底层 workflow 能在安全点收尾。
     WebConsoleController::~WebConsoleController()
     {
         std::thread worker_to_join;
@@ -285,12 +306,14 @@ namespace workflow::web
         }
     }
 
+    // Server 层注册一个回调，控制器后续把状态/日志/error 事件推给 SSE hub。
     void WebConsoleController::setEventCallback(EventCallback callback)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         event_callback_ = std::move(callback);
     }
 
+    // Web Console 关闭时调用：把停止信号传给后台 workflow，并立即向前端广播 stopping 状态。
     void WebConsoleController::RequestWorkerStop()
     {
         EventCallback callback;
@@ -313,35 +336,41 @@ namespace workflow::web
         dispatchEvents(callback, events);
     }
 
+    // 显式等待工作线程退出，供 web 退出路径在持久化配置前做收尾同步。
     void WebConsoleController::JoinWorker()
     {
         joinWorkerIfNeeded();
     }
 
+    // 返回当前控制器维护的统一运行态快照，HTTP `/api/state` 直接依赖这里。
     shared::WorkflowRuntimeSnapshot WebConsoleController::snapshot() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return runtime_snapshot_;
     }
 
+    // 返回当前内存中的 infer 配置，不一定已经被写回 YAML。
     infer::AppConfig WebConsoleController::inferConfig() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return infer_cfg_;
     }
 
+    // 返回当前内存中的 RD 配置，不一定已经被写回 YAML。
     rd::AppConfig WebConsoleController::rdConfig() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return rd_cfg_;
     }
 
+    // 返回 Web 侧缓存的飞行参数，用于设置页回显与持久化。
     FlightSettings WebConsoleController::flightSettings() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return flight_settings_;
     }
 
+    // 将 infer 子模块暴露的 manual telemetry 适配成 Web 协议层结构。
     ManualFlightTelemetry WebConsoleController::manualTelemetry() const
     {
         const infer::ManualFlightTelemetry infer_telemetry = infer::GetManualFlightTelemetry();
@@ -361,12 +390,14 @@ namespace workflow::web
         return telemetry;
     }
 
+    // 依据当前 workflow 枚举输入源列表，供 `/api/sources` 统一调用。
     std::vector<SourceInfo> WebConsoleController::listSources(shared::SelectedWorkflow workflow) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return workflow == shared::SelectedWorkflow::InferOnly ? listInferSourcesLocked() : listRdSourcesLocked();
     }
 
+    // 只有 infer 图片源允许预览，这里同时完成“是否存在”和“是否真的是图片”的双重校验。
     std::optional<std::filesystem::path> WebConsoleController::resolveInferPreviewPath(const std::string &id) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -382,6 +413,8 @@ namespace workflow::web
         return path;
     }
 
+    // 处理前端“模式/输出/source 选择”变更。
+    // 该接口只改选择本身；如果当前处于 paused，会先停掉旧 worker，再切到新选择。
     std::string WebConsoleController::applySelection(const std::unordered_map<std::string, std::string> &fields)
     {
         std::thread worker_to_join;
@@ -518,6 +551,8 @@ namespace workflow::web
         return MakeOkResponse("Selection updated.");
     }
 
+    // 处理前端设置面板的批量字段提交。
+    // 这里负责：解析字符串 -> 更新临时配置副本 -> 做跨字段校验 -> 原子替换控制器内存状态。
     std::string WebConsoleController::applySettings(const std::unordered_map<std::string, std::string> &fields)
     {
         EventCallback callback;
@@ -742,6 +777,8 @@ namespace workflow::web
         return MakeOkResponse("Settings updated in memory.");
     }
 
+    // Start 既承担“首次启动”也承担“从 paused 恢复”两种语义。
+    // 首次启动时会冻结一份 last_applied_，供 reset 回退到最近一次成功启动前的配置。
     std::string WebConsoleController::commandStart()
     {
         joinWorkerIfNeeded();
@@ -828,6 +865,7 @@ namespace workflow::web
         return MakeOkResponse(resume_requested ? "Workflow resumed." : "Workflow start requested.");
     }
 
+    // Pause 只发协作式暂停请求，真正停在什么位置由 workflow 内部安全点决定。
     std::string WebConsoleController::commandPause()
     {
         EventCallback callback;
@@ -852,11 +890,13 @@ namespace workflow::web
         return MakeOkResponse("Pause requested.");
     }
 
+    // Stop 不等待线程立刻退出，只把状态推进到 stopping 并请求后台在安全点停止。
     std::string WebConsoleController::commandStop()
     {
         return stopWorkflow(false, "Stop requested.");
     }
 
+    // Reset 的语义是“回到最近一次成功 start 之前的控制器内存态”，不是回默认配置。
     std::string WebConsoleController::commandReset()
     {
         if (isRunningState(snapshot().state))
@@ -894,6 +934,7 @@ namespace workflow::web
         return MakeOkResponse("Controller reset completed.");
     }
 
+    // 关闭 Web Console 前必须先确保 workflow 已停掉，否则后续配置落盘与线程收尾次序会混乱。
     std::string WebConsoleController::commandShutdownWeb()
     {
         if (isRunningState(snapshot().state))
@@ -918,6 +959,8 @@ namespace workflow::web
         return MakeOkResponse("Web Console shutdown requested.");
     }
 
+    // 将前端 W/A/S/D 事件转给 manual_flight。
+    // 当前 cursor 模式只消费 keydown，keyup 会被明确忽略。
     std::string WebConsoleController::commandManualKey(const std::unordered_map<std::string, std::string> &fields)
     {
         EventCallback callback;
@@ -974,6 +1017,7 @@ namespace workflow::web
         return MakeOkResponse(message);
     }
 
+    // 往待发送队列里压入一条事件；真正发给 SSE 客户端由 dispatchEvents 统一完成。
     void WebConsoleController::queueEventLocked(std::vector<PendingEvent> &events,
                                                 const std::string &event_name,
                                                 const std::string &payload) const
@@ -981,21 +1025,25 @@ namespace workflow::web
         events.push_back(PendingEvent{event_name, payload});
     }
 
+    // 生成最新状态事件，状态体里还会带上 manual telemetry 的投影字段。
     void WebConsoleController::queueStateLocked(std::vector<PendingEvent> &events) const
     {
         queueEventLocked(events, "state", MakeStateResponse(runtime_snapshot_, manualTelemetry()));
     }
 
+    // 统一产生日志事件，前端会直接写进 event stream 面板。
     void WebConsoleController::queueLogLocked(std::vector<PendingEvent> &events, const std::string &message) const
     {
         queueEventLocked(events, "log", MakeLogEvent(message));
     }
 
+    // 统一产生 error 事件，供前端做醒目提示。
     void WebConsoleController::queueErrorLocked(std::vector<PendingEvent> &events, const std::string &message) const
     {
         queueEventLocked(events, "error", MakeErrorEvent(message));
     }
 
+    // 在锁外执行回调，避免 SSE 回调路径反向进入控制器造成锁重入风险。
     void WebConsoleController::dispatchEvents(const EventCallback &callback, const std::vector<PendingEvent> &events)
     {
         if (!callback)
@@ -1008,6 +1056,8 @@ namespace workflow::web
         }
     }
 
+    // workflow 线程持续通过 run_control_ 回传快照。
+    // 控制器在这里把“底层状态”与“前端选择态”合并，并补上阶段切换日志。
     void WebConsoleController::onWorkflowSnapshot(const shared::WorkflowRuntimeSnapshot &snapshot)
     {
         EventCallback callback;
@@ -1039,6 +1089,8 @@ namespace workflow::web
         dispatchEvents(callback, events);
     }
 
+    // 真正执行 Infer/RD 的后台线程入口。
+    // 这里不做业务逻辑，只做状态切换、异常兜底和结束态归并。
     void WebConsoleController::workerMain(shared::WorkflowSelection selection,
                                           infer::AppConfig infer_cfg,
                                           rd::AppConfig rd_cfg,
@@ -1121,6 +1173,7 @@ namespace workflow::web
         dispatchEvents(callback, events);
     }
 
+    // 统一的停止实现，`wait_for_worker=true` 时用于 reset / shutdown 这种必须同步收尾的路径。
     std::string WebConsoleController::stopWorkflow(bool wait_for_worker, const std::string &success_message)
     {
         std::thread worker_to_join;
@@ -1160,6 +1213,7 @@ namespace workflow::web
         return MakeOkResponse(success_message);
     }
 
+    // 如果线程对象仍然 joinable 且逻辑上已结束，就在这里补做 join，避免句柄长期悬挂。
     void WebConsoleController::joinWorkerIfNeeded()
     {
         std::thread worker_to_join;
@@ -1176,6 +1230,7 @@ namespace workflow::web
         }
     }
 
+    // Web 侧把 Starting/Running/Paused/Stopping 都视作“占用中”，禁止并发改设置。
     bool WebConsoleController::isRunningState(shared::ControlState state) const
     {
         return state == shared::ControlState::Starting ||
@@ -1184,6 +1239,7 @@ namespace workflow::web
                state == shared::ControlState::Stopping;
     }
 
+    // Web 配置结构与 infer 子模块内部结构字段名一致但不完全同型，这里做显式拷贝转换。
     infer::ManualFlightSettings WebConsoleController::toInferManualSettings(const FlightSettings &settings)
     {
         infer::ManualFlightSettings infer_settings;
@@ -1196,6 +1252,7 @@ namespace workflow::web
         return infer_settings;
     }
 
+    // 回退到最近一次成功启动前的配置与选择快照，供 Reset 复位使用。
     void WebConsoleController::restoreLastAppliedLocked()
     {
         infer_cfg_ = last_applied_.infer_cfg;
@@ -1204,11 +1261,13 @@ namespace workflow::web
         runtime_snapshot_.selection = last_applied_.selection;
     }
 
+    // Infer 源列表来自 SAR 图片目录，支持递归扫描。
     std::vector<SourceInfo> WebConsoleController::listInferSourcesLocked() const
     {
         return scanSources(infer_cfg_.sar_img_dir, infer_cfg_.sar_img_ext, infer_cfg_.recursive, "SAR PNG", true);
     }
 
+    // RD 源列表来自 echo bin 目录，当前只做一层扫描。
     std::vector<SourceInfo> WebConsoleController::listRdSourcesLocked() const
     {
         return scanSources(rd_cfg_.echo_dir, rd_cfg_.echo_ext, false, "Echo BIN", false);

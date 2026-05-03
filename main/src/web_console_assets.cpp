@@ -2,6 +2,8 @@
 
 namespace workflow::web::assets
 {
+    // 返回 Web Console 的静态 HTML 骨架。
+    // 页面本身很薄，真正的状态驱动逻辑在下方内嵌的 app.js 中。
     const std::string &IndexHtml()
     {
         static const std::string html = R"HTML(<!doctype html>
@@ -105,6 +107,7 @@ namespace workflow::web::assets
         return html;
     }
 
+    // 返回单文件 CSS 资源，控制台前端当前不依赖额外静态目录或打包产物。
     const std::string &AppCss()
     {
         static const std::string css = R"CSS(:root{
@@ -189,6 +192,8 @@ button{font:inherit;cursor:pointer}
         return css;
     }
 
+    // 返回整个控制台前端脚本。
+    // 服务端会把这段字符串直接作为 `/app.js` 的响应体返回给浏览器。
     const std::string &AppJs()
     {
         static const std::string js = R"JS((function(){
@@ -213,8 +218,11 @@ const flightFields=[
   ["flight.cache_grid_px","cache_grid_px (legacy)"],["flight.path_overlay","path_overlay"],["flight.control_bindings","control_bindings"]
 ];
 
+// 整个前端的唯一全局状态容器：
+// 保存后端状态快照、设置缓存、source 列表以及 SSE 连接状态。
 const app={ state:null, settings:{}, sources:[], selectedSource:"", eventSource:null, settingsVisible:false, shutdownInProgress:false, connectionClosedNotified:false };
 
+// 将一条日志写到页面底部的 Event Stream 面板。
 function logLine(message){
   const box=document.getElementById("log-box");
   const stamp=new Date().toLocaleTimeString();
@@ -222,11 +230,13 @@ function logLine(message){
   box.scrollTop=box.scrollHeight;
 }
 
+// 发起 GET 请求并按 JSON 解析，供只读接口调用。
 async function getJson(url){
   const response=await fetch(url);
   return response.json();
 }
 
+// 发起 POST JSON 请求，并把常见失败模式统一封装成标准返回对象。
 async function postJson(url, body){
   const response=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
   const statusSuffix=Number.isInteger(response.status) ? ` (HTTP ${response.status})` : "";
@@ -246,6 +256,7 @@ async function postJson(url, body){
   }
 }
 
+// 渲染一组单选按钮，例如 workflow / patch / output 区域。
 function renderButtons(containerId, choices, selected, handler, className){
   const root=document.getElementById(containerId);
   root.innerHTML="";
@@ -258,6 +269,7 @@ function renderButtons(containerId, choices, selected, handler, className){
   });
 }
 
+// 将 `/api/state` 的状态快照铺平成右侧状态键值面板。
 function renderStatus(){
   if(!app.state){return;}
   const pairs=[
@@ -299,6 +311,7 @@ function renderStatus(){
   });
 }
 
+// 渲染可选输入源列表，并在点击后把选择同步回控制器。
 function renderSources(){
   const list=document.getElementById("source-list");
   list.innerHTML="";
@@ -320,6 +333,7 @@ function renderSources(){
   });
 }
 
+// 根据当前 source 和 workflow 决定是否显示预览图。
 function renderPreview(){
   const preview=document.getElementById("source-preview");
   const empty=document.getElementById("preview-empty");
@@ -335,6 +349,7 @@ function renderPreview(){
   }
 }
 
+// 根据字段清单批量生成设置面板输入框。
 function renderSettingsSection(containerId, fields){
   const root=document.getElementById(containerId);
   root.innerHTML="";
@@ -350,6 +365,7 @@ function renderSettingsSection(containerId, fields){
   });
 }
 
+// 同步设置面板的显示/隐藏状态和按钮文案。
 function syncSettingsVisibility(){
   const panel=document.getElementById("settings-panel");
   const toggle=document.getElementById("settings-toggle");
@@ -358,6 +374,7 @@ function syncSettingsVisibility(){
   toggle.innerHTML=app.settingsVisible ? "&#9881; Hide Settings" : "&#9881; Settings";
 }
 
+// 在 shutdown 进行中禁用按钮，避免重复发关闭请求。
 function syncShutdownButton(){
   const button=document.getElementById("shutdown-web");
   if(!button){return;}
@@ -365,6 +382,7 @@ function syncShutdownButton(){
   button.title=app.shutdownInProgress ? "Web Console is shutting down" : "Shutdown Web Console";
 }
 
+// 向后端发送 W/A/S/D 输入，驱动 manual_flight 模式的 patch 移动。
 async function sendManualKey(key){
   const normalizedKey=String(key || "").toLowerCase();
   if(!["w","a","s","d"].includes(normalizedKey)){
@@ -386,6 +404,7 @@ async function sendManualKey(key){
   }
 }
 
+// 重绘所有依赖当前状态的页面区域。
 function renderAll(){
   if(!app.state){return;}
   renderButtons("workflow-buttons", workflowChoices, app.state.workflow_mode, async (value)=>{
@@ -416,6 +435,7 @@ function renderAll(){
   syncShutdownButton();
 }
 
+// 渲染 Start / Pause / Stop / Reset 控制按钮。
 function renderCommandButtons(){
   const root=document.getElementById("command-buttons");
   root.innerHTML="";
@@ -432,6 +452,7 @@ function renderCommandButtons(){
   });
 }
 
+// 将 workflow / patch / output / source 当前选择一次性提交给后端。
 async function pushSelection(){
   const response=await postJson("/api/selection",{
     workflow_mode:app.state.workflow_mode,
@@ -444,17 +465,20 @@ async function pushSelection(){
   return response;
 }
 
+// 主动刷新 `/api/state`，并驱动页面重绘。
 async function refreshState(){
   app.state=await getJson("/api/state");
   app.selectedSource=app.state.selected_source || app.selectedSource;
   renderAll();
 }
 
+// 主动刷新 `/api/settings`，更新表单默认值。
 async function refreshSettings(){
   app.settings=await getJson("/api/settings");
   renderAll();
 }
 
+// 重新加载 source 列表；若旧选择失效，会自动选第一个可用项。
 async function reloadSources(){
   const workflow=(app.state && app.state.workflow_mode) || "infer";
   const payload=await getJson(`/api/sources?workflow=${encodeURIComponent(workflow)}`);
@@ -478,6 +502,7 @@ async function reloadSources(){
   renderPreview();
 }
 
+// 建立 SSE 连接，持续接收 state/log/error 三类事件。
 function connectEvents(){
   app.eventSource=new EventSource("/events");
   app.eventSource.addEventListener("state",(event)=>{
@@ -509,6 +534,7 @@ function connectEvents(){
   });
 }
 
+// 向后端发送 shutdown_web 命令，并切换到“等待连接断开”的前端状态。
 async function shutdownWebConsole(){
   if(app.shutdownInProgress){
     return;
@@ -528,6 +554,7 @@ async function shutdownWebConsole(){
   }
 }
 
+// 绑定页面上所有静态 DOM 事件。
 function bindStaticActions(){
   document.getElementById("reload-sources").onclick=reloadSources;
   document.getElementById("save-settings").onclick=saveSettings;
@@ -556,6 +583,7 @@ function bindStaticActions(){
   });
 }
 
+// 收集设置面板当前值并整体提交给 `/api/settings`。
 async function saveSettings(){
   const payload={};
   document.querySelectorAll(".settings input").forEach((input)=>{
@@ -567,6 +595,7 @@ async function saveSettings(){
   await reloadSources();
 }
 
+// 页面初始化入口：先拿初始状态，再接上 SSE，之后主要依赖事件驱动刷新。
 async function boot(){
   bindStaticActions();
   await refreshState();

@@ -19,14 +19,18 @@ namespace workflow::web
 {
     namespace
     {
+        // 只支持一层对象的极简 JSON 解析器。
+        // 它专门服务当前 Web Console 的扁平键值请求体，不追求完整 JSON 兼容。
         class FlatJsonParser
         {
         public:
+            // 保存原始 JSON 文本。
             explicit FlatJsonParser(const std::string &input)
                 : input_(input)
             {
             }
 
+            // 解析整个对象，输出 string -> string 的平面键值表。
             std::unordered_map<std::string, std::string> parseObject()
             {
                 skipWhitespace();
@@ -63,11 +67,13 @@ namespace workflow::web
             }
 
         private:
+            // 读取当前位置字符；越界时返回 '\0'。
             char peek() const
             {
                 return pos_ < input_.size() ? input_[pos_] : '\0';
             }
 
+            // 跳过连续空白字符。
             void skipWhitespace()
             {
                 while (pos_ < input_.size() && std::isspace(static_cast<unsigned char>(input_[pos_])))
@@ -76,6 +82,7 @@ namespace workflow::web
                 }
             }
 
+            // 断言当前位置是指定字符，否则抛解析异常。
             void expect(char ch)
             {
                 if (peek() != ch)
@@ -85,6 +92,7 @@ namespace workflow::web
                 ++pos_;
             }
 
+            // 解析一个 JSON 字符串，并处理常见转义字符。
             std::string parseString()
             {
                 expect('"');
@@ -136,6 +144,8 @@ namespace workflow::web
                 throw std::runtime_error("Invalid JSON string.");
             }
 
+            // 解析一个 value。
+            // 当前实现支持字符串和无引号原始 token，最终都落成字符串。
             std::string parseValue()
             {
                 if (peek() == '"')
@@ -160,6 +170,7 @@ namespace workflow::web
             size_t pos_ = 0;
         };
 
+        // 向手写 JSON 输出流中追加一个字段。
         void appendJsonField(std::ostringstream &oss,
                              bool &first,
                              const std::string &key,
@@ -182,6 +193,7 @@ namespace workflow::web
             }
         }
 
+        // 在给定超时内等待 socket 可读。
         bool waitForReadable(int fd, int timeout_ms)
         {
             while (true)
@@ -207,6 +219,7 @@ namespace workflow::web
             }
         }
 
+        // 去掉 HTTP token 两端的 CR/LF 和空白字符。
         std::string TrimHttpToken(std::string value)
         {
             while (!value.empty() &&
@@ -222,6 +235,7 @@ namespace workflow::web
             return value.substr(offset);
         }
 
+        // 把 ASCII 文本转成小写，供 header key 归一化使用。
         std::string ToLowerAscii(std::string value)
         {
             std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
@@ -233,12 +247,14 @@ namespace workflow::web
 
     namespace detail
     {
+        // 返回 HTTP 请求解析器的默认限制配置。
         const HttpRequestLimits &DefaultHttpRequestLimits()
         {
             static const HttpRequestLimits limits{8 * 1024, 1024 * 1024, 5000};
             return limits;
         }
 
+        // 把解析错误类别映射成 HTTP 状态行。
         std::string MapHttpRequestStatus(HttpRequestErrorKind kind)
         {
             switch (kind)
@@ -253,6 +269,7 @@ namespace workflow::web
             return "400 Bad Request";
         }
 
+        // 把解析错误类别映射成返回给前端的 JSON 错误码。
         std::string MapHttpRequestErrorCode(HttpRequestErrorKind kind)
         {
             switch (kind)
@@ -267,6 +284,7 @@ namespace workflow::web
             return "invalid_request";
         }
 
+        // 解析并校验 Content-Length。
         size_t ParseContentLengthValue(const std::string &raw_value, const HttpRequestLimits &limits)
         {
             const std::string value = TrimHttpToken(raw_value);
@@ -296,6 +314,7 @@ namespace workflow::web
             return content_length;
         }
 
+        // 解析一整块 HTTP 头部文本，提取 method/path/query/header 元信息。
         HttpRequest ParseHttpRequestHeaderBlock(const std::string &raw_header, const HttpRequestLimits &limits)
         {
             if (raw_header.size() > limits.max_header_bytes)
@@ -348,6 +367,7 @@ namespace workflow::web
             return request;
         }
 
+        // 从 socket 持续读取，直到拿到一份完整的 HTTP 请求。
         HttpRequest ReadHttpRequestFromSocket(int fd)
         {
             const HttpRequestLimits &limits = DefaultHttpRequestLimits();
@@ -414,6 +434,7 @@ namespace workflow::web
             }
         }
 
+        // 根据 method + path 把请求分派到内部路由枚举。
         WebConsoleRoute MatchWebConsoleRoute(const HttpRequest &request)
         {
             const bool is_get = request.method == "GET";
@@ -455,6 +476,7 @@ namespace workflow::web
         }
     }
 
+    // 把内部控制状态转成前端使用的小写字符串。
     std::string ToString(shared::ControlState state)
     {
         switch (state)
@@ -477,6 +499,7 @@ namespace workflow::web
         return "unknown";
     }
 
+    // 把内部工作流枚举转成前端使用的字符串。
     std::string ToString(shared::SelectedWorkflow workflow)
     {
         switch (workflow)
@@ -489,6 +512,7 @@ namespace workflow::web
         return "infer";
     }
 
+    // 把内部 patch 模式枚举转成前端使用的字符串。
     std::string ToString(shared::SelectedPatchMode patch_mode)
     {
         switch (patch_mode)
@@ -503,6 +527,7 @@ namespace workflow::web
         return "auto_snake";
     }
 
+    // 从前端字符串解析出工作流枚举。
     bool ParseSelectedWorkflow(const std::string &value, shared::SelectedWorkflow &workflow)
     {
         const std::string lowered = shared::ToLower(shared::Trim(value));
@@ -519,6 +544,7 @@ namespace workflow::web
         return false;
     }
 
+    // 从前端字符串解析出 patch 模式枚举。
     bool ParseSelectedPatchMode(const std::string &value, shared::SelectedPatchMode &patch_mode)
     {
         const std::string lowered = shared::ToLower(shared::Trim(value));
@@ -540,6 +566,7 @@ namespace workflow::web
         return false;
     }
 
+    // 以最小实现集转义 JSON 字符串。
     std::string JsonEscape(const std::string &value)
     {
         std::ostringstream oss;
@@ -570,6 +597,7 @@ namespace workflow::web
         return oss.str();
     }
 
+    // 生成标准成功响应体。
     std::string MakeOkResponse(const std::string &message)
     {
         std::ostringstream oss;
@@ -577,6 +605,7 @@ namespace workflow::web
         return oss.str();
     }
 
+    // 生成标准错误响应体。
     std::string MakeErrorResponse(const std::string &code, const std::string &message)
     {
         std::ostringstream oss;
@@ -584,6 +613,7 @@ namespace workflow::web
         return oss.str();
     }
 
+    // 把统一运行态快照序列化成 `/api/state` 返回值。
     std::string MakeStateResponse(const shared::WorkflowRuntimeSnapshot &snapshot,
                                   const ManualFlightTelemetry &manual_telemetry)
     {
@@ -619,6 +649,7 @@ namespace workflow::web
         return oss.str();
     }
 
+    // 生成 SSE log 事件的 JSON 载荷。
     std::string MakeLogEvent(const std::string &message)
     {
         std::ostringstream oss;
@@ -626,6 +657,7 @@ namespace workflow::web
         return oss.str();
     }
 
+    // 生成 SSE error 事件的 JSON 载荷。
     std::string MakeErrorEvent(const std::string &message)
     {
         std::ostringstream oss;
@@ -633,6 +665,7 @@ namespace workflow::web
         return oss.str();
     }
 
+    // 把 infer / rd / flight 三份设置序列化给前端设置面板。
     std::string MakeSettingsResponse(const infer::AppConfig &infer_cfg,
                                      const rd::AppConfig &rd_cfg,
                                      const FlightSettings &flight_settings)
@@ -687,6 +720,7 @@ namespace workflow::web
         return oss.str();
     }
 
+    // 把源列表打包成 `/api/sources` 返回值。
     std::string MakeSourcesResponse(const std::vector<SourceInfo> &sources)
     {
         std::ostringstream oss;
@@ -710,11 +744,13 @@ namespace workflow::web
         return oss.str();
     }
 
+    // 解析当前 Web API 使用的扁平 JSON 请求体。
     std::unordered_map<std::string, std::string> ParseFlatJsonObject(const std::string &json)
     {
         return FlatJsonParser(json).parseObject();
     }
 
+    // 对 URL 编码文本做解码，供 query string 解析使用。
     std::string UrlDecode(const std::string &value)
     {
         std::string out;
@@ -739,6 +775,7 @@ namespace workflow::web
         return out;
     }
 
+    // 把 `a=b&c=d` 形式的查询字符串解析成键值表。
     std::unordered_map<std::string, std::string> ParseQueryString(const std::string &query)
     {
         std::unordered_map<std::string, std::string> values;

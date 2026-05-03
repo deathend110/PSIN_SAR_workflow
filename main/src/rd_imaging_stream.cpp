@@ -26,6 +26,7 @@ namespace workflow::rd
 
     namespace
     {
+        // 通过异常把“协作式停止”从深层 tile 处理循环快速抛回顶层主循环。
         struct StopRequested : public std::exception
         {
             const char *what() const noexcept override
@@ -34,6 +35,8 @@ namespace workflow::rd
             }
         };
 
+        // 当前 RD 成像使用的一组固定雷达参数。
+        // 这些参数直接参与距离压缩、方位压缩和 RCMC 的滤波器推导。
         struct RadarConfig
         {
             double c = 3e8;
@@ -49,12 +52,14 @@ namespace workflow::rd
             double gamma() const { return B / Tp; }
         };
 
+        // echo bin 文件头里声明的二维复数矩阵尺寸。
         struct EchoShape
         {
             int rows = 0;
             int cols = 0;
         };
 
+    // 把 RD 配置映射成统一的运行时选择快照，便于 Web Console 展示同一套状态协议。
     shared::WorkflowSelection makeSelection(const AppConfig &cfg)
     {
         shared::WorkflowSelection selection;
@@ -65,6 +70,8 @@ namespace workflow::rd
         return selection;
     }
 
+    // 向外部控制面发布 RD 当前所处阶段。
+    // RD 本身不感知 Web，二者只通过 WorkflowRunControl 交换快照。
     void publishSnapshot(shared::WorkflowRunControl *control,
                          const AppConfig &cfg,
                          shared::ControlState state,
@@ -90,6 +97,8 @@ namespace workflow::rd
         control->publish(snapshot);
     }
 
+    // 在每个安全点检查暂停/停止请求。
+    // RD 是 tile 驱动的大循环，因此这里是所有长耗时步骤的统一协作式控制入口。
     void checkControl(shared::WorkflowRunControl *control)
     {
         if (control == nullptr)
@@ -103,6 +112,7 @@ namespace workflow::rd
         }
     }
 
+    // 统一输出带时间戳的控制台日志，便于串联多阶段 scratch / memory 管线的执行轨迹。
     void logLine(const std::string &message)
     {
         const auto now = std::chrono::system_clock::now();
@@ -116,6 +126,7 @@ namespace workflow::rd
         std::cout << "[" << std::put_time(&tm, "%F %T") << "] " << message << std::endl;
     }
 
+    // echo bin 文件头使用 little-endian int32 存储尺寸，这里显式按字节解析避免平台歧义。
     std::int32_t readLittleEndianInt32(std::ifstream &ifs)
     {
         unsigned char bytes[4] = {0, 0, 0, 0};
@@ -130,6 +141,7 @@ namespace workflow::rd
         return static_cast<std::int32_t>(value);
     }
 
+    // 读取 echo 文件头并校验“声明尺寸”和“实际文件字节数”是否一致。
     EchoShape readEchoShapeAndValidate(const fs::path &path)
     {
         std::ifstream ifs(path, std::ios::binary);
@@ -155,6 +167,7 @@ namespace workflow::rd
         return EchoShape{rows, cols};
     }
 
+    // 生成和 numpy `fftshift(fftfreq(...))` 语义一致的频率轴，供滤波器设计使用。
     std::vector<double> fftfreqShifted(int n, double d)
     {
         std::vector<double> freq(n);
@@ -173,6 +186,7 @@ namespace workflow::rd
         return shifted;
     }
 
+    // 根据二次相位项生成复指数滤波器，double 版本用于高精度 scratch / memory 管线。
     std::vector<cv::Vec2d> makeComplexExponential(const std::vector<double> &freq, double coefficient)
     {
         std::vector<cv::Vec2d> out(freq.size());
@@ -184,6 +198,7 @@ namespace workflow::rd
         return out;
     }
 
+    // float32 版本滤波器，供 memory_float32 管线减少内存占用。
     std::vector<cv::Vec2f> makeComplexExponentialF32(const std::vector<double> &freq, double coefficient)
     {
         std::vector<cv::Vec2f> out(freq.size());
@@ -195,16 +210,19 @@ namespace workflow::rd
         return out;
     }
 
+    // 复数乘法的小工具，避免在热点循环里重复写实部/虚部公式。
     cv::Vec2d complexMultiply(const cv::Vec2d &a, const cv::Vec2d &b)
     {
         return cv::Vec2d(a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]);
     }
 
+    // float32 版本复数乘法。
     cv::Vec2f complexMultiply(const cv::Vec2f &a, const cv::Vec2f &b)
     {
         return cv::Vec2f(a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]);
     }
 
+    // 对指定轴执行循环位移，是 fftshift/ifftshift 的底层实现。
     cv::Mat rollAxis(const cv::Mat &src, int axis, int shift)
     {
         CV_Assert(src.type() == CV_64FC2);
@@ -242,18 +260,21 @@ namespace workflow::rd
         return dst;
     }
 
+    // double 复数矩阵版本 fftshift。
     cv::Mat fftshift(const cv::Mat &src, int axis)
     {
         const int n = (axis == 0) ? src.rows : src.cols;
         return rollAxis(src, axis, n / 2);
     }
 
+    // double 复数矩阵版本 ifftshift。
     cv::Mat ifftshift(const cv::Mat &src, int axis)
     {
         const int n = (axis == 0) ? src.rows : src.cols;
         return rollAxis(src, axis, -(n / 2));
     }
 
+    // float32 复数矩阵版本的循环位移。
     cv::Mat rollAxisF32(const cv::Mat &src, int axis, int shift)
     {
         CV_Assert(src.type() == CV_32FC2);
@@ -291,18 +312,22 @@ namespace workflow::rd
         return dst;
     }
 
+    // float32 复数矩阵版本 fftshift。
     cv::Mat fftshiftF32(const cv::Mat &src, int axis)
     {
         const int n = (axis == 0) ? src.rows : src.cols;
         return rollAxisF32(src, axis, n / 2);
     }
 
+    // float32 复数矩阵版本 ifftshift。
     cv::Mat ifftshiftF32(const cv::Mat &src, int axis)
     {
         const int n = (axis == 0) ? src.rows : src.cols;
         return rollAxisF32(src, axis, -(n / 2));
     }
 
+    // 沿单个轴做 DFT / IDFT。
+    // OpenCV 原生更擅长按行处理，这里对 axis=0 通过转置绕过去。
     cv::Mat dftAxis(const cv::Mat &src, int axis, bool inverse)
     {
         CV_Assert(src.type() == CV_64FC2);
@@ -327,6 +352,7 @@ namespace workflow::rd
         return dst;
     }
 
+    // float32 版本单轴 DFT / IDFT。
     cv::Mat dftAxisF32(const cv::Mat &src, int axis, bool inverse)
     {
         CV_Assert(src.type() == CV_32FC2);
@@ -351,18 +377,21 @@ namespace workflow::rd
         return dst;
     }
 
+    // 将二维复数矩阵中的某个元素位置映射成 scratch 文件字节偏移。
     std::uint64_t complexOffsetBytes(int row, int col, int total_cols)
     {
         return static_cast<std::uint64_t>(row) * static_cast<std::uint64_t>(total_cols) * sizeof(cv::Vec2d) +
                static_cast<std::uint64_t>(col) * sizeof(cv::Vec2d);
     }
 
+    // 幅度 scratch 是 double 标量矩阵，这里计算其字节偏移。
     std::uint64_t doubleOffsetBytes(int row, int col, int total_cols)
     {
         return static_cast<std::uint64_t>(row) * static_cast<std::uint64_t>(total_cols) * sizeof(double) +
                static_cast<std::uint64_t>(col) * sizeof(double);
     }
 
+    // 带错误检查的 seekg，避免文件随机访问失败后静默继续。
     void checkedSeekg(std::ifstream &ifs, std::uint64_t offset)
     {
         ifs.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
@@ -372,6 +401,7 @@ namespace workflow::rd
         }
     }
 
+    // 带错误检查的 seekp，用于对 scratch 文件执行按 tile 的随机写入。
     void checkedSeekp(std::fstream &fs_out, std::uint64_t offset)
     {
         fs_out.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
@@ -381,6 +411,8 @@ namespace workflow::rd
         }
     }
 
+    // 从原始 echo bin 中按“列块”读取复数数据。
+    // 距离压缩阶段按列处理，因此这种访问模式能减少峰值内存。
     cv::Mat readEchoColumnTile(const fs::path &path, int rows, int cols, int col0, int tile_cols)
     {
         std::ifstream ifs(path, std::ios::binary);
@@ -414,6 +446,7 @@ namespace workflow::rd
         return tile;
     }
 
+    // 一次性把整个 echo 读入 float32 复数矩阵，供 memory_float32 路径使用。
     cv::Mat loadEchoF32(const fs::path &path, const EchoShape &shape)
     {
         std::ifstream ifs(path, std::ios::binary);
@@ -435,6 +468,7 @@ namespace workflow::rd
         return data;
     }
 
+    // 从整图内存矩阵中切出一块列 tile。
     cv::Mat gatherColumnTileF32(const cv::Mat &src, int col0, int tile_cols)
     {
         CV_Assert(src.type() == CV_32FC2);
@@ -448,6 +482,7 @@ namespace workflow::rd
         return tile;
     }
 
+    // 将处理完的 float32 列 tile 写回整图。
     void scatterColumnTileF32(const cv::Mat &tile, cv::Mat &dst, int col0)
     {
         CV_Assert(tile.type() == CV_32FC2);
@@ -460,6 +495,7 @@ namespace workflow::rd
         }
     }
 
+    // 从 scratch 复数文件中按“行块”读回一段数据，供方位向相关阶段处理。
     cv::Mat readComplexRowTile(const fs::path &path, int cols, int row0, int tile_rows)
     {
         std::ifstream ifs(path, std::ios::binary);
@@ -480,6 +516,7 @@ namespace workflow::rd
         return tile;
     }
 
+    // 把按列处理得到的复数 tile 写到 scratch 对应列位置。
     void writeComplexColumnTile(std::fstream &ofs, const cv::Mat &tile, int total_cols, int col0)
     {
         CV_Assert(tile.type() == CV_64FC2);
@@ -494,6 +531,7 @@ namespace workflow::rd
         }
     }
 
+    // 把按行处理得到的复数 tile 顺序写回 scratch。
     void writeComplexRowTile(std::fstream &ofs, const cv::Mat &tile, int total_cols, int row0)
     {
         CV_Assert(tile.type() == CV_64FC2);
@@ -507,6 +545,7 @@ namespace workflow::rd
         }
     }
 
+    // 把幅度结果写入单独的 magnitude scratch，供最终归一化输出阶段使用。
     void writeMagnitudeRowTile(std::fstream &ofs, const cv::Mat &mag_tile, int total_cols, int row0)
     {
         CV_Assert(mag_tile.type() == CV_64FC1);
@@ -520,6 +559,7 @@ namespace workflow::rd
         }
     }
 
+    // 从 magnitude scratch 中按行块回读，用于最终 PNG 归一化落盘。
     cv::Mat readMagnitudeRowTile(const fs::path &path, int cols, int row0, int tile_rows)
     {
         std::ifstream ifs(path, std::ios::binary);
@@ -540,6 +580,7 @@ namespace workflow::rd
         return tile;
     }
 
+    // 以“可随机读写、创建即清空”的方式打开 scratch 文件。
     std::fstream openScratchForRandomWrite(const fs::path &path)
     {
         std::fstream stream(path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
@@ -550,6 +591,7 @@ namespace workflow::rd
         return stream;
     }
 
+    // 将距离向匹配滤波器逐行乘到 tile 上。
     void multiplyRowsByFilterInPlace(cv::Mat &tile, const std::vector<cv::Vec2d> &filter)
     {
         CV_Assert(tile.type() == CV_64FC2);
@@ -564,6 +606,7 @@ namespace workflow::rd
         }
     }
 
+    // 将方位向滤波器逐列乘到 tile 上。
     void multiplyColsByFilterInPlace(cv::Mat &tile, const std::vector<cv::Vec2d> &filter)
     {
         CV_Assert(tile.type() == CV_64FC2);
@@ -578,6 +621,7 @@ namespace workflow::rd
         }
     }
 
+    // float32 版本距离向逐行滤波。
     void multiplyRowsByFilterInPlaceF32(cv::Mat &tile, const std::vector<cv::Vec2f> &filter)
     {
         CV_Assert(tile.type() == CV_32FC2);
@@ -592,6 +636,7 @@ namespace workflow::rd
         }
     }
 
+    // float32 版本方位向逐列滤波。
     void multiplyColsByFilterInPlaceF32(cv::Mat &tile, const std::vector<cv::Vec2f> &filter)
     {
         CV_Assert(tile.type() == CV_32FC2);
@@ -606,6 +651,7 @@ namespace workflow::rd
         }
     }
 
+    // 根据方位频率轴计算每一列需要补偿的距离徙动样本偏移量。
     std::vector<double> makeRcmcShifts(const std::vector<double> &f_a, const RadarConfig &cfg)
     {
         const double delta_r = cfg.c / (2.0 * cfg.Fs);
@@ -621,6 +667,8 @@ namespace workflow::rd
         return shifts;
     }
 
+    // 对一个行窗口执行 RCMC 插值，并只输出本 tile 负责的行段。
+    // 之所以额外传 input_row0/output_row0，是因为输入窗口通常包含“超出本 tile 的补边”。
     cv::Mat rcmcRowTile(const cv::Mat &input_window,
                         int input_row0,
                         int output_row0,
@@ -658,6 +706,8 @@ namespace workflow::rd
         return output;
     }
 
+    // float32 内存管线的原地 RCMC。
+    // 为了避免当前位置被自己覆盖，需要先保存当前行再做插值。
     void rcmcInPlaceF32(cv::Mat &data, const std::vector<double> &shifts)
     {
         CV_Assert(data.type() == CV_32FC2);
@@ -688,6 +738,8 @@ namespace workflow::rd
         }
     }
 
+    // 收集待处理 echo 文件列表。
+    // 输入既可以是单个 bin 文件，也可以是包含多个 bin 的目录。
     std::vector<fs::path> collectEchoBins(const AppConfig &cfg)
     {
         if (!fs::exists(cfg.echo_dir))
@@ -723,6 +775,8 @@ namespace workflow::rd
         return files;
     }
 
+    // Scratch 管线的第一阶段：距离压缩。
+    // 读取 echo 的列 tile，沿距离向做 FFT -> 匹配滤波 -> IFFT，并写入 stage_a。
     void runRangeCompression(const fs::path &echo_path,
                              const fs::path &stage_a,
                              const EchoShape &shape,
@@ -746,6 +800,7 @@ namespace workflow::rd
         }
     }
 
+    // 与 `runRangeCompression` 等价，但把结果直接拼到内存矩阵里，避免 stage_a scratch。
     cv::Mat runRangeCompressionToMemory(const fs::path &echo_path,
                                         const EchoShape &shape,
                                         const std::vector<cv::Vec2d> &Hr,
@@ -775,6 +830,7 @@ namespace workflow::rd
         return data_rc;
     }
 
+    // Scratch 管线第二阶段：对 stage_a 做方位向 FFT，结果写入 stage_b。
     void runAzimuthFft(const fs::path &stage_a,
                        const fs::path &stage_b,
                        const EchoShape &shape,
@@ -795,6 +851,8 @@ namespace workflow::rd
         }
     }
 
+    // 将 RCMC 单独拆成 scratch 阶段的版本。
+    // 当前主路径已经更多使用 fused 版本，但保留这个实现便于理解和调试。
     void runRcmc(const fs::path &stage_b,
                  const fs::path &stage_a,
                  const EchoShape &shape,
@@ -824,6 +882,8 @@ namespace workflow::rd
         }
     }
 
+    // 将方位压缩、IFFT 和幅度计算串起来，并把结果写成 magnitude scratch。
+    // 返回全局 min/max，供最终 PNG 归一化使用。
     std::pair<double, double> runAzimuthCompressionAndMagnitude(const fs::path &stage_a,
                                                                 const fs::path &magnitude_path,
                                                                 const EchoShape &shape,
@@ -864,6 +924,9 @@ namespace workflow::rd
         return {min_val, max_val};
     }
 
+    // 当前 scratch 主路径使用的融合阶段：
+    // 读取方位频域数据 -> 对当前 row tile 做 RCMC -> 方位压缩 -> IFFT -> 幅度提取。
+    // 这样可以少落一次中间 scratch，并顺手统计全图幅度范围。
     std::pair<double, double> runFusedRcmcAzimuthCompressionAndMagnitude(const fs::path &stage_b,
                                                                          const fs::path &magnitude_path,
                                                                          const EchoShape &shape,
@@ -919,6 +982,8 @@ namespace workflow::rd
         return {min_val, max_val};
     }
 
+    // double 精度的纯内存管线：
+    // 已完成距离压缩的数据直接在内存中走方位 FFT、RCMC、方位压缩和 IFFT。
     cv::Mat runMemoryPipeline(cv::Mat data_rc,
                               const EchoShape &shape,
                               const std::vector<double> &f_a,
@@ -962,6 +1027,7 @@ namespace workflow::rd
         return dftAxis(data_rcmc, 1, true);
     }
 
+    // 直接从复数图像统计幅度范围并归一化成 8-bit PNG。
     void writeNormalizedPngFromComplex(const cv::Mat &complex_img, const fs::path &output_path)
     {
         CV_Assert(complex_img.type() == CV_64FC2);
@@ -1005,6 +1071,7 @@ namespace workflow::rd
         }
     }
 
+    // float32 复数图像版本的 PNG 归一化输出。
     void writeNormalizedPngFromComplexF32(const cv::Mat &complex_img, const fs::path &output_path)
     {
         CV_Assert(complex_img.type() == CV_32FC2);
@@ -1048,6 +1115,7 @@ namespace workflow::rd
         }
     }
 
+    // 从 magnitude scratch 逐 tile 回读，按全局 min/max 归一化成最终 PNG。
     void writeNormalizedPng(const fs::path &magnitude_path,
                             const fs::path &output_path,
                             const EchoShape &shape,
@@ -1088,6 +1156,7 @@ namespace workflow::rd
         }
     }
 
+    // 板端优先路径：在 float32 内存里完成整条 RD 管线，尽量压低峰值内存与 scratch I/O。
     void runMemoryFloat32Pipeline(const fs::path &echo_path,
                                   const fs::path &output_path,
                                   const EchoShape &shape,
@@ -1150,6 +1219,8 @@ namespace workflow::rd
         writeNormalizedPngFromComplexF32(data, output_path);
     }
 
+    // 处理单个 echo bin 的总控函数。
+    // 它负责：输入校验、输出命名、scratch 生命周期、管线模式选择以及阶段快照发布。
     void processOneEcho(const fs::path &echo_path,
                         const AppConfig &cfg,
                         shared::WorkflowRunControl *control = nullptr,
@@ -1286,11 +1357,14 @@ namespace workflow::rd
     }
     }
 
+// 从配置文件路径启动 RD workflow 的便捷入口。
 int Run(const std::filesystem::path &config_path)
 {
     return Run(LoadConfig(config_path), nullptr);
 }
 
+// RD workflow 顶层入口。
+// 顶层只负责编排文件列表和失败统计；单个文件内部失败会被记录并继续处理后续文件。
 int Run(const AppConfig &cfg, shared::WorkflowRunControl *control)
 {
     try

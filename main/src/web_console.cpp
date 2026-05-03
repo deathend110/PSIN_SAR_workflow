@@ -20,13 +20,16 @@ namespace workflow::web
 {
     namespace
     {
+        // Web Console 主线程轮询的全局停止标记。
         std::atomic<bool> g_web_console_stop{false};
 
+        // Ctrl+C / SIGTERM 信号处理器：这里只做轻量标记，不在信号处理器里做复杂逻辑。
         void handleInterrupt(int)
         {
             g_web_console_stop = true;
         }
 
+        // 把结构化的 flight settings 转成 controller.applySettings 使用的扁平字段表。
         std::unordered_map<std::string, std::string> MakeFlightSettingsFields(const FlightSettings &settings)
         {
             return {
@@ -39,6 +42,7 @@ namespace workflow::web
             };
         }
 
+        // 把 Web 配置里保存的默认 flight settings 先应用到内存态 controller。
         void ApplyInitialFlightSettings(WebConsoleController &controller, const FlightSettings &settings)
         {
             const auto response = controller.applySettings(MakeFlightSettingsFields(settings));
@@ -48,6 +52,7 @@ namespace workflow::web
             }
         }
 
+        // 在 Web Console 退出时，把 infer / rd / web 三份运行态配置持久化到 runtime YAML。
         void PersistControllerConfigs(const std::filesystem::path &web_config_path,
                                       const WebConsoleConfig &base_web_cfg,
                                       const WebConsoleController &controller)
@@ -61,6 +66,8 @@ namespace workflow::web
         }
     }
 
+    // Web Console 顶层入口。
+    // 负责配置加载、controller/server 构造、web 线程托管，以及退出时的统一收尾。
     int Run(const std::filesystem::path &config_path)
     {
         std::thread web_thread;

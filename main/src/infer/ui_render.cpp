@@ -15,12 +15,14 @@ namespace workflow::infer
 {
     namespace
     {
+        // 状态徽章在 UI 顶栏里同时有“圆点颜色”和“文字颜色”，这里把两者打包管理。
         struct StatusBadgeStyle
         {
             cv::Scalar dot_color;
             cv::Scalar text_color;
         };
 
+        // 这些标签都表示流程仍处于可操作/可继续推进的状态，只是细分为暂停、撞边等待等子态。
         bool isOperationalStatusLabel(const std::string &status_label)
         {
             return status_label == "PAUSED" ||
@@ -28,6 +30,7 @@ namespace workflow::infer
                    status_label == "RUNNING";
         }
 
+        // 根据运行状态挑选顶栏徽章配色，让“停止态”和“运行态”视觉上容易一眼区分。
         StatusBadgeStyle resolveStatusBadgeStyle(const std::string &status_label)
         {
             const cv::Scalar running_dot_color(94, 197, 34);
@@ -46,6 +49,7 @@ namespace workflow::infer
             return {running_dot_color, running_text_color};
         }
 
+        // 在像素宽度受限时裁掉尾部文本，并补 `...`，避免标题挤爆面板。
         std::string truncateToWidth(const std::string &text,
                                     int max_width,
                                     int font_face,
@@ -80,6 +84,7 @@ namespace workflow::infer
             return ellipsis;
         }
 
+        // 从一个矩形向内收边，生成留有 padding 的内容区域。
         cv::Rect insetRect(const cv::Rect &rect, int dx, int dy)
         {
             const int width = std::max(1, rect.width - 2 * dx);
@@ -87,6 +92,7 @@ namespace workflow::infer
             return cv::Rect(rect.x + dx, rect.y + dy, width, height);
         }
 
+        // 绘制轻量网格纹理，给工业风面板增加结构感，同时帮助观察 patch / 视图区边界。
         void drawGridTexture(cv::Mat &canvas, const cv::Rect &rect, int step, const cv::Scalar &color)
         {
             if (step <= 0)
@@ -103,6 +109,7 @@ namespace workflow::infer
             }
         }
 
+        // 绘制统一面板骨架：背景、标题栏、边框，并返回已经扣除标题栏和内边距后的正文区域。
         cv::Rect drawPanel(cv::Mat &canvas,
                            const cv::Rect &rect,
                            const std::string &title,
@@ -156,6 +163,7 @@ namespace workflow::infer
                              std::max(8, rect.height / 40));
         }
 
+        // 在固定槽位里按原始宽高比缩放图片，算出最终可绘制矩形。
         cv::Rect fitImageRect(const cv::Size &src_size, const cv::Rect &slot)
         {
             if (src_size.width <= 0 || src_size.height <= 0 || slot.width <= 0 || slot.height <= 0)
@@ -171,6 +179,7 @@ namespace workflow::infer
             return cv::Rect(x, y, width, height);
         }
 
+        // 按 `fitImageRect` 的结果把图片缩放贴到目标画布上，并返回实际占用区域。
         cv::Rect drawFittedImage(const cv::Mat &src, cv::Mat &dst, const cv::Rect &slot, int interpolation)
         {
             if (src.empty())
@@ -184,6 +193,7 @@ namespace workflow::infer
             return target;
         }
 
+        // 将归一化 SAR 灰度图转成 BGR，方便后续统一在三通道画布上叠加 UI 元素。
         cv::Mat normalizedSarToBgr(const cv::Mat &sar_norm)
         {
             cv::Mat sar_u8;
@@ -193,6 +203,7 @@ namespace workflow::infer
             return sar_bgr;
         }
 
+        // 用于显示“当前 patch / 总 patch”这类计数。
         std::string formatCounter(int current, int total)
         {
             if (total > 0)
@@ -202,11 +213,13 @@ namespace workflow::infer
             return std::to_string(current);
         }
 
+        // 渲染帧编号标签，例如 `#17`。
         std::string formatFrameCounter(int current)
         {
             return std::string("#") + std::to_string(current);
         }
 
+        // 统一格式化毫秒耗时，避免不同位置出现不一致的小数位。
         std::string formatMillis(double value)
         {
             std::ostringstream oss;
@@ -216,6 +229,7 @@ namespace workflow::infer
             return oss.str();
         }
 
+        // 统一格式化 FPS 文本。
         std::string formatFps(double value)
         {
             std::ostringstream oss;
@@ -225,6 +239,7 @@ namespace workflow::infer
             return oss.str();
         }
 
+        // 把源图像坐标映射到缩略图矩形内部，供路径点和 patch 框投影使用。
         cv::Point mapPointToRect(const cv::Point2f &point, const MiniMapContext &context, const cv::Rect &target_rect)
         {
             const double x_ratio = context.source_width > 0 ? point.x / static_cast<double>(context.source_width) : 0.0;
@@ -234,6 +249,7 @@ namespace workflow::infer
             return cv::Point(x, y);
         }
 
+        // 画左侧 telemetry 面板的多行键值对列表。
         void drawMetricRows(cv::Mat &canvas,
                             const cv::Rect &body_rect,
                             const std::vector<std::pair<std::string, std::string>> &metrics,
@@ -294,6 +310,7 @@ namespace workflow::infer
             }
         }
 
+        // 绘制 mini-map：底图、历史路径、当前 patch 框和当前中心点都在这里完成。
         void drawMiniMap(cv::Mat &canvas,
                          const cv::Rect &body_rect,
                          const MiniMapContext &context,
@@ -339,6 +356,7 @@ namespace workflow::infer
             cv::circle(canvas, current_center, std::max(5, body_rect.width / 50), current_point_color, 1, cv::LINE_AA);
         }
 
+        // 绘制语义分割类别图例，颜色必须和 mask 渲染使用的类别颜色保持一致。
         void drawLegend(cv::Mat &canvas, const cv::Rect &panel_rect)
         {
             static const std::array<const char *, kSegClasses> names = {
@@ -396,6 +414,8 @@ namespace workflow::infer
         }
     }
 
+    // 语义类别 id 到 BGR 颜色的统一映射。
+    // 这个函数既被 mask 渲染使用，也被 legend 面板复用。
     cv::Vec3b classColorBgr(int cls)
     {
         static const cv::Vec3b colors[kSegClasses] = {
@@ -408,6 +428,8 @@ namespace workflow::infer
         return colors[std::max(0, std::min(cls, kSegClasses - 1))];
     }
 
+    // 构造 mini-map 所需的静态上下文。
+    // 当前版本只保留底图尺寸和 patch_size，stride/rows/cols 作为预留参数留给后续布局扩展。
     MiniMapContext buildMiniMapContext(const cv::Mat &sar_norm, int patch_size, int stride, int rows, int cols)
     {
         (void)stride;
@@ -421,6 +443,8 @@ namespace workflow::infer
         return context;
     }
 
+    // 把 manual_flight 运行时 telemetry 投影到 UI 状态结构里，
+    // 这样 compose 阶段就不用直接依赖线程同步对象。
     void applyManualTelemetry(RuntimeState &state, UiRenderContext &ui_context)
     {
         const ManualFlightTelemetry telemetry = GetManualFlightTelemetry();
@@ -451,6 +475,8 @@ namespace workflow::infer
         ui_context.mini_map.path_points = runtime->pathPoints();
     }
 
+    // 生成 HDMI / 调试输出使用的整张工业风界面。
+    // 输入是已经准备好的业务数据，函数本身只负责“排版 + 绘制”，不做推理或状态推进。
     cv::Mat composeIndustrialUiFrame(const UiRenderContext &ui_context,
                                      const RuntimeState &state,
                                      const cv::Mat &restore_bgr,

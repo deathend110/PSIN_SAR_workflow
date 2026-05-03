@@ -23,6 +23,7 @@ namespace workflow::shared
         constexpr const char *kExampleYamlSuffix = ".example.yaml";
         constexpr const char *kYamlSuffix = ".yaml";
 
+        // 把层级键路径如 ["server", "bind"] 拼成 "server.bind"。
         std::string JoinPath(const std::vector<std::string> &scopes)
         {
             std::string path;
@@ -37,12 +38,14 @@ namespace workflow::shared
             return path;
         }
 
+        // 判断字符串是否以指定后缀结尾。
         bool EndsWith(const std::string &value, const std::string &suffix)
         {
             return value.size() >= suffix.size() &&
                    value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
         }
 
+        // 根据 runtime 配置路径推导出对应的 example 配置路径。
         std::filesystem::path ExampleConfigPath(const std::filesystem::path &runtime_path)
         {
             const auto filename = runtime_path.filename().string();
@@ -56,6 +59,7 @@ namespace workflow::shared
             return example_path;
         }
 
+        // 一次性读入整个文本文件，主要供配置 bootstrap 复制使用。
         std::string ReadTextFile(const std::filesystem::path &path)
         {
             std::ifstream ifs(path, std::ios::binary);
@@ -81,6 +85,7 @@ namespace workflow::shared
         }
     }
 
+    // 去掉字符串首尾空白。
     std::string Trim(std::string value)
     {
         const auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
@@ -89,6 +94,7 @@ namespace workflow::shared
         return value;
     }
 
+    // 若字符串被单引号或双引号完整包裹，则去掉最外层引号。
     std::string StripQuotes(std::string value)
     {
         value = Trim(std::move(value));
@@ -101,6 +107,7 @@ namespace workflow::shared
         return value;
     }
 
+    // 就地把字符串转换为小写副本。
     std::string ToLower(std::string value)
     {
         std::transform(value.begin(), value.end(), value.begin(),
@@ -108,6 +115,7 @@ namespace workflow::shared
         return value;
     }
 
+    // 按仓库里常见的 true/false、1/0、yes/no、on/off 规则解析布尔值。
     bool ParseBool(const std::string &value, const std::string &error_context)
     {
         const auto lowered = ToLower(Trim(value));
@@ -125,6 +133,8 @@ namespace workflow::shared
         throw std::runtime_error(prefix + value);
     }
 
+    // 读取简化 YAML。
+    // 这个解析器不追求完整 YAML 兼容，只支持当前仓库用到的“缩进 + key: value”结构。
     std::unordered_map<std::string, std::string> LoadSimpleYaml(const std::filesystem::path &config_path)
     {
         std::ifstream ifs(config_path);
@@ -174,6 +184,7 @@ namespace workflow::shared
         return values;
     }
 
+    // 如果传入的是 `*.example.yaml`，则把它映射到对应的 runtime `*.yaml`。
     std::filesystem::path RuntimeConfigPath(const std::filesystem::path &config_path)
     {
         const auto filename = config_path.filename().string();
@@ -187,6 +198,8 @@ namespace workflow::shared
         return runtime_path;
     }
 
+    // 确保 runtime 配置存在。
+    // 如果 runtime 文件缺失，则尝试从同名 example 文件复制一份。
     std::filesystem::path EnsureRuntimeConfigFile(const std::filesystem::path &config_path)
     {
         const auto runtime_path = RuntimeConfigPath(config_path);
@@ -205,6 +218,7 @@ namespace workflow::shared
         return runtime_path;
     }
 
+    // 从键值表读取字符串；若不存在则返回默认值。
     std::string ValueOr(const std::unordered_map<std::string, std::string> &values,
                         const std::string &key,
                         const std::string &default_value)
@@ -213,6 +227,7 @@ namespace workflow::shared
         return it == values.end() ? default_value : it->second;
     }
 
+    // 从键值表读取整数；若不存在则返回默认值。
     int IntValueOr(const std::unordered_map<std::string, std::string> &values,
                    const std::string &key,
                    int default_value)
@@ -221,6 +236,7 @@ namespace workflow::shared
         return it == values.end() ? default_value : std::stoi(it->second);
     }
 
+    // 从键值表读取布尔值；若不存在则返回默认值。
     bool BoolValueOr(const std::unordered_map<std::string, std::string> &values,
                      const std::string &key,
                      bool default_value,
@@ -230,6 +246,8 @@ namespace workflow::shared
         return it == values.end() ? default_value : ParseBool(it->second, error_context);
     }
 
+    // 以“临时文件写入成功后再替换正式文件”的方式安全写配置。
+    // 这样即使中途失败，也尽量避免留下半写入的损坏文件。
     void WriteTextFileAtomically(const std::filesystem::path &path, const std::string &content)
     {
         const auto parent = path.parent_path();
